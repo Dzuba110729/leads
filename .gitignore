@@ -1,0 +1,12 @@
+.env
+*.session
+*.session-journal
+*.db
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+.DS_Store
+*.egg-info/
+.ipynb_checkpoints/

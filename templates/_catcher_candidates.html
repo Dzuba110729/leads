@@ -1,0 +1,9 @@
+{% if candidates %}
+<div class="candidate-grid" id="candidates-grid">
+  {% for c in candidates %}
+  {% include "_catcher_candidate_card.html" %}
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty-state" id="candidates-grid">Пока нет кандидатов — нажмите «Выгрузить сейчас» у источника.</div>
+{% endif %}

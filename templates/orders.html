@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}og1 CRM — Заявки{% endblock %}
+{% block content %}
+<div class="topbar">
+  <div>
+    <h1>Заявки</h1>
+    <div class="subtitle">Воронка от заявки до зачисления — сдвигайте статус по мере продвижения</div>
+  </div>
+</div>
+<div class="board" id="board">
+  {% include "_orders_board.html" %}
+</div>
+{% endblock %}

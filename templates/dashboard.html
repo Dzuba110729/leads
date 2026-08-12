@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}og1 CRM — Дашборд{% endblock %}
+{% block content %}
+<div class="topbar">
+  <div>
+    <h1>Дашборд</h1>
+    <div class="subtitle">Сводка по заявкам og1 и ловцу лидов</div>
+  </div>
+</div>
+
+<div class="metrics-grid">
+  <div class="card metric-card">
+    <div class="metric-label">Лидов всего</div>
+    <div class="metric-value">{{ leads_count }}</div>
+  </div>
+  <div class="card metric-card">
+    <div class="metric-label">Заявок в работе</div>
+    <div class="metric-value">{{ open_orders_count }}</div>
+  </div>
+  <div class="card metric-card">
+    <div class="metric-label">Сумма открытых заявок</div>
+    <div class="metric-value">{{ open_orders_sum_label }}</div>
+  </div>
+  <div class="card metric-card">
+    <div class="metric-label">Новых кандидатов (ловец)</div>
+    <div class="metric-value">{{ new_candidates_count }}</div>
+  </div>
+</div>
+
+<div class="card" style="margin-bottom: 20px;">
+  <div class="section-title">Последние заявки</div>
+  {% if recent_orders %}
+  <div class="list">
+    {% for o in recent_orders %}
+    <div class="list-row">
+      <span class="pill" style="background: var(--status-{{ o['status'] }})">{{ o['status'] }}</span>
+      <span class="url">{{ o['tariff'] }} · {{ o['department'] }}</span>
+      <span class="checked-at">{{ o['price_label'] }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty-state">Пока нет заявок — они появятся здесь после эскалации лида.</div>
+  {% endif %}
+</div>
+
+<a class="btn" href="/orders">Открыть все заявки →</a>
+{% endblock %}

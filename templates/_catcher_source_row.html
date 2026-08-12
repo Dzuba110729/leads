@@ -1,0 +1,16 @@
+<div class="list-row" id="source-{{ s['id'] }}">
+  <span class="platform-badge">{{ s['platform'] }}</span>
+  <span class="url">{{ s['url'] }}</span>
+  <span class="checked-at">{{ s['last_checked_at'] or 'ещё не проверялось' }}</span>
+  <span class="pill" style="background: {{ 'var(--status-оплачено)' if s['enabled'] else 'var(--text-muted)' }}">
+    {{ 'включён' if s['enabled'] else 'выключен' }}
+  </span>
+  <div class="row-actions">
+    <form hx-post="/catcher/sources/{{ s['id'] }}/fetch" hx-target="#source-{{ s['id'] }}" hx-swap="outerHTML">
+      <button type="submit">Выгрузить сейчас</button>
+    </form>
+    <form hx-post="/catcher/sources/{{ s['id'] }}/toggle" hx-target="#source-{{ s['id'] }}" hx-swap="outerHTML">
+      <button type="submit">{{ 'Выключить' if s['enabled'] else 'Включить' }}</button>
+    </form>
+  </div>
+</div>

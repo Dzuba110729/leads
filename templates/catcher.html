@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}og1 CRM — Ловец лидов{% endblock %}
+{% block content %}
+<div class="topbar">
+  <div>
+    <h1>Ловец лидов</h1>
+    <div class="subtitle">Автовыгрузка чатов и групп — шаг 1, бот сам никому не пишет первым</div>
+  </div>
+</div>
+
+<div class="card" style="margin-bottom: 20px;">
+  <div class="section-title">Источники</div>
+  <form class="add-source-form" hx-post="/catcher/sources" hx-target="#sources-list" hx-swap="outerHTML">
+    <select name="platform">
+      <option value="tg">Telegram</option>
+      <option value="vk">VK</option>
+    </select>
+    <input name="url" placeholder="https://t.me/group или https://vk.com/group" required>
+    <button type="submit" class="btn-primary">Добавить источник</button>
+  </form>
+  {% include "_catcher_sources.html" %}
+</div>
+
+<div class="card">
+  <div class="section-title">Кандидаты</div>
+  {% include "_catcher_candidates.html" %}
+</div>
+
+<p class="hint">Бот сам никому не пишет первым — переходите по ссылке и заходите в разговор вручную.</p>
+{% endblock %}

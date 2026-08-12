@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>og1 CRM — Вход</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="login-screen">
+    <form class="card login-card" method="post" action="/login">
+      <div class="brand" style="margin-bottom: 20px;">og1 CRM</div>
+      {% if error %}
+      <div class="login-error">{{ error }}</div>
+      {% endif %}
+      <label>Логин
+        <input type="text" name="username" autocomplete="username" required autofocus>
+      </label>
+      <label>Пароль
+        <input type="password" name="password" autocomplete="current-password" required>
+      </label>
+      <button type="submit" class="btn-primary">Войти</button>
+    </form>
+  </div>
+</body>
+</html>

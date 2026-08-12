@@ -1,0 +1,19 @@
+<div class="card candidate-card" id="candidate-{{ c['id'] }}">
+  <blockquote>{{ c['quote'] }}</blockquote>
+  <div class="reason">{{ c['reason'] }}</div>
+  <div class="opener">{{ c['opener_text'] }}</div>
+  <div class="row">
+    {% if c['contact_url'] %}
+    <a href="{{ c['contact_url'] }}" target="_blank" rel="noopener">Перейти к диалогу →</a>
+    {% else %}
+    <span class="hint" style="margin-top:0">Ссылки нет</span>
+    {% endif %}
+    {% if c['status'] == 'contacted' %}
+    <span class="pill" style="background: var(--status-оплачено)">написал</span>
+    {% else %}
+    <form hx-post="/catcher/candidates/{{ c['id'] }}/contacted" hx-target="#candidate-{{ c['id'] }}" hx-swap="outerHTML">
+      <button type="submit">Отметить «написал»</button>
+    </form>
+    {% endif %}
+  </div>
+</div>

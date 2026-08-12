@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Загрузка салона — тренажёр методологии</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,560;0,9..144,650;1,9..144,500&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#F7F2E9;
+    --paper-2:#EFE6D2;
+    --card:#FFFDF8;
+    --ink:#2A1A22;
+    --muted:#6E5F58;
+    --line:#DFD3BA;
+    --berry:#7A2048;
+    --berry-dark:#4E1530;
+    --gold:#AD7F3F;
+    --gold-soft:#F1E4C6;
+    --sage:#5F7A52;
+    --sage-soft:#E4EADB;
+    --rust:#A6472F;
+    --rust-soft:#F4DCD2;
+    --amber:#B4842A;
+    --amber-soft:#F5E7C9;
+    --radius:14px;
+    --shadow: 0 1px 2px rgba(42,26,34,.04), 0 8px 24px -12px rgba(42,26,34,.18);
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;
+    background:var(--paper);
+    color:var(--ink);
+    font-family:'Inter',sans-serif;
+    font-size:16px;
+    line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  ::selection{background:var(--gold-soft);}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 28px;}
+  a{color:inherit;}
+  .mono{font-family:'IBM Plex Mono',monospace; font-variant-numeric: tabular-nums;}
+  .eyebrow{
+    font-family:'Inter',sans-serif;
+    font-size:12px;
+    font-weight:600;
+    text-transform:uppercase;
+    letter-spacing:.09em;
+    color:var(--gold);
+    margin:0 0 14px 0;
+  }
+  h1,h2,h3{font-family:'Fraunces',serif; font-weight:650; margin:0; color:var(--ink);}
+  h1{font-size:clamp(32px,5.4vw,58px); line-height:1.08; letter-spacing:-.01em;}
+  h1 em{font-style:italic; font-weight:500; color:var(--berry);}
+  h2{font-size:clamp(24px,3vw,34px); line-height:1.15; margin-bottom:10px;}
+  h3{font-size:19px; font-weight:650;}
+  p{margin:0 0 14px 0; color:var(--muted);}
+  .lead{font-size:18px; color:var(--ink); max-width:640px;}
+  section{padding:76px 0;}
+  section.tight{padding:52px 0;}
+  .section-head{max-width:640px; margin-bottom:36px;}
+  .divider{height:1px; background:var(--line); border:none; margin:0;}
+
+  /* ---------- HERO ---------- */
+  .hero{padding:88px 0 60px 0; position:relative; overflow:hidden;}
+  .hero-grid{display:grid; grid-template-columns:1.15fr .85fr; gap:56px; align-items:center;}
+  .hero-cta{
+    display:inline-flex; align-items:center; gap:8px;
+    margin-top:28px; padding:12px 20px;
+    background:var(--berry); color:#fff;
+    border-radius:999px; text-decoration:none;
+    font-size:14px; font-weight:600;
+    box-shadow:var(--shadow);
+    transition:transform .15s ease, background .15s ease;
+    border:none; cursor:pointer;
+  }
+  .hero-cta:hover{background:var(--berry-dark); transform:translateY(-1px);}
+  .hero-card{
+    background:var(--card); border:1px solid var(--line); border-radius:20px;
+    padding:22px; box-shadow:var(--shadow);
+  }
+  .mini-cal{display:grid; grid-template-columns:repeat(7,1fr); gap:5px;}
+  .mini-cal .day-label{font-size:10px; text-align:center; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.04em; padding-bottom:4px;}
+  .mini-cell{aspect-ratio:1/.72; border-radius:6px;}
+  .hero-card-cap{display:flex; justify-content:space-between; align-items:center; margin-top:14px; padding-top:14px; border-top:1px dashed var(--line);}
+  .hero-card-cap span{font-size:12px; color:var(--muted);}
+  .hero-card-cap .tag{display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted);}
+  .dot{width:9px; height:9px; border-radius:50%; display:inline-block;}
+
+  /* ---------- WHY CARDS ---------- */
+  .why-grid{display:grid; grid-template-columns:1fr 1fr; gap:24px;}
+  .why-card{
+    background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+    padding:28px; box-shadow:var(--shadow);
+  }
+  .why-card .icon{width:44px;height:44px;margin-bottom:16px;}
+  .why-card.idle{border-top:4px solid var(--sage);}
+  .why-card.overflow{border-top:4px solid var(--rust);}
+  .formula-chip{
+    margin-top:16px; padding:10px 14px; border-radius:10px;
+    font-family:'IBM Plex Mono',monospace; font-size:13.5px;
+    background:var(--paper-2); display:inline-block; color:var(--ink);
+  }
+
+  /* ---------- PARAMS PANEL ---------- */
+  .panel{
+    background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+    padding:28px 30px; box-shadow:var(--shadow);
+  }
+  .params-grid{display:grid; grid-template-columns:repeat(5,1fr); gap:22px;}
+  .field label{
+    display:flex; justify-content:space-between; align-items:baseline;
+    font-size:13px; font-weight:600; color:var(--ink); margin-bottom:8px;
+  }
+  .field label .val{font-family:'IBM Plex Mono',monospace; color:var(--berry); font-weight:600;}
+  .field .hint{font-size:11.5px; color:var(--muted); margin-top:6px; line-height:1.4;}
+  input[type=range]{
+    -webkit-appearance:none; width:100%; height:4px; border-radius:2px;
+    background:var(--line); outline:none; margin:0;
+  }
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none; width:16px; height:16px; border-radius:50%;
+    background:var(--berry); cursor:pointer; border:2px solid #fff; box-shadow:0 0 0 1px var(--berry);
+  }
+  input[type=range]::-moz-range-thumb{
+    width:16px; height:16px; border-radius:50%; background:var(--berry); cursor:pointer; border:2px solid #fff; box-shadow:0 0 0 1px var(--berry);
+  }
+  input[type=number]{
+    width:100%; padding:9px 10px; border-radius:8px; border:1px solid var(--line);
+    font-family:'IBM Plex Mono',monospace; font-size:14px; background:var(--paper);
+    color:var(--ink);
+  }
+
+  /* ---------- HEATMAP ---------- */
+  .heatmap-wrap{display:grid; grid-template-columns:2.4fr 1fr; gap:24px; align-items:start;}
+  .heatmap{
+    display:grid; grid-template-columns:repeat(7,1fr); gap:8px;
+  }
+  .heat-daylabel{font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); text-align:center; padding-bottom:2px;}
+  .heat-cell{
+    background:var(--card); border:1px solid var(--line); border-radius:10px;
+    padding:10px 8px 8px 8px; display:flex; flex-direction:column; gap:6px;
+    transition:box-shadow .15s ease;
+  }
+  .heat-cell:hover{box-shadow:var(--shadow);}
+  .heat-block{font-size:10px; color:var(--muted); font-weight:600;}
+  .heat-load{
+    font-family:'IBM Plex Mono',monospace; font-size:18px; font-weight:600;
+    border-radius:6px; padding:4px 0; text-align:center;
+  }
+  .heat-cell input[type=range]{height:3px;}
+  .heat-excess{display:flex; align-items:center; justify-content:space-between; gap:4px; font-size:10px; color:var(--rust);}
+  .heat-excess button{
+    width:18px; height:18px; border-radius:4px; border:1px solid var(--rust);
+    background:#fff; color:var(--rust); font-size:11px; cursor:pointer; line-height:1;
+  }
+  .legend{display:flex; gap:16px; margin-top:14px; flex-wrap:wrap;}
+  .legend .item{display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted);}
+
+  /* receipt / totals */
+  .receipt{
+    background:var(--card); border:1px solid var(--line); border-radius:14px 14px 0 0;
+    padding:22px 24px 26px 24px; position:relative; box-shadow:var(--shadow);
+  }
+  .receipt-torn{height:14px; margin-top:-1px;
+    background-image:
+      linear-gradient(135deg, var(--paper) 50%, transparent 50%),
+      linear-gradient(-135deg, var(--paper) 50%, transparent 50%);
+    background-size:16px 16px; background-position:bottom left, bottom left; background-repeat:repeat-x;
+  }
+  .receipt h4{font-family:'Fraunces',serif; font-weight:650; font-size:16px; margin:0 0 14px 0;}
+  .receipt-row{display:flex; justify-content:space-between; font-size:13.5px; padding:7px 0; border-bottom:1px dashed var(--line);}
+  .receipt-row .label{color:var(--muted);}
+  .receipt-row .amt{font-family:'IBM Plex Mono',monospace; font-weight:600;}
+  .receipt-row.total{border-bottom:none; padding-top:12px; font-size:15px;}
+  .receipt-row.total .amt{color:var(--berry); font-size:19px;}
+
+  /* ---------- SIMULATOR ---------- */
+  .sim-grid{display:grid; grid-template-columns:1fr 1fr; gap:28px; align-items:start;}
+  select{
+    width:100%; padding:11px 12px; border-radius:9px; border:1px solid var(--line);
+    background:var(--paper) url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6"><path d="M0 0l5 6 5-6z" fill="%236E5F58"/></svg>') no-repeat right 12px center;
+    font-family:'Inter',sans-serif; font-size:14px; color:var(--ink); appearance:none; -webkit-appearance:none;
+  }
+  .sim-slot-label{font-size:12px; font-weight:600; color:var(--muted); margin-bottom:6px; text-transform:uppercase; letter-spacing:.04em;}
+  .verdict{
+    border-radius:14px; padding:20px 22px; margin-top:18px;
+    display:flex; gap:14px; align-items:flex-start;
+    border:1px solid transparent;
+  }
+  .verdict.good{background:var(--sage-soft); border-color:#c7d6ba;}
+  .verdict.warn{background:var(--amber-soft); border-color:#e7cf9c;}
+  .verdict.bad{background:var(--rust-soft); border-color:#e6bda9;}
+  .verdict .vicon{font-size:22px; line-height:1;}
+  .verdict .vtext strong{display:block; font-size:15.5px; margin-bottom:3px; font-family:'Fraunces',serif; font-weight:650;}
+  .verdict .vtext p{margin:0; font-size:13.5px; color:var(--ink); opacity:.85;}
+
+  .math-steps{
+    margin-top:18px; background:var(--paper-2); border-radius:12px; padding:16px 18px;
+    font-family:'IBM Plex Mono',monospace; font-size:12.8px; line-height:2;
+    color:var(--ink);
+  }
+  .math-steps .step-label{color:var(--muted); font-family:'Inter',sans-serif; font-size:11.5px;}
+
+  /* ---------- AGENT STEPS ---------- */
+  .steps{display:grid; grid-template-columns:repeat(4,1fr); gap:20px;}
+  .step-card{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:22px 20px;}
+  .step-num{
+    font-family:'Fraunces',serif; font-style:italic; font-size:26px; color:var(--gold); margin-bottom:10px; display:block;
+  }
+  .step-card h3{font-size:15.5px; margin-bottom:6px;}
+  .step-card p{font-size:13.5px; margin:0;}
+
+  footer{padding:44px 0 60px 0; border-top:1px solid var(--line);}
+  footer p{font-size:13px; color:var(--muted); margin:0;}
+
+  .reveal{opacity:0; transform:translateY(14px); transition:opacity .6s ease, transform .6s ease;}
+  .reveal.in{opacity:1; transform:none;}
+
+  @media (max-width:860px){
+    .hero-grid{grid-template-columns:1fr;}
+    .why-grid{grid-template-columns:1fr;}
+    .params-grid{grid-template-columns:repeat(2,1fr);}
+    .heatmap-wrap{grid-template-columns:1fr;}
+    .heatmap{grid-template-columns:repeat(7,minmax(78px,1fr)); overflow-x:auto;}
+    .sim-grid{grid-template-columns:1fr;}
+    .steps{grid-template-columns:1fr 1fr;}
+  }
+  @media (max-width:520px){
+    .wrap{padding:0 18px;}
+    .params-grid{grid-template-columns:1fr;}
+    .steps{grid-template-columns:1fr;}
+  }
+  @media (prefers-reduced-motion: reduce){
+    html{scroll-behavior:auto;}
+    .reveal{opacity:1; transform:none; transition:none;}
+  }
+</style>
+</head>
+<body>
+
+<!-- ============ HERO ============ -->
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <p class="eyebrow">Загрузка салона · интерактивный тренажёр</p>
+      <h1>Утро пустует.<br>Суббота <em>трещит по швам.</em></h1>
+      <p class="lead" style="margin-top:18px;">
+        Один и тот же салон, один и тот же мастер — а прибыль в понедельник утром и в субботу
+        вечером отличается в разы. Разберитесь, сколько денег теряется на пустых и переполненных
+        часах, и подвигайте цифры сами, чтобы понять, на какую скидку можно уговорить клиента
+        переехать на более удобное время.
+      </p>
+      <a href="#params" class="hero-cta">Начать разбираться ↓</a>
+    </div>
+    <div class="hero-card">
+      <div class="mini-cal" id="miniCal"></div>
+      <div class="hero-card-cap">
+        <div class="tag"><span class="dot" style="background:var(--sage)"></span>свободно</div>
+        <div class="tag"><span class="dot" style="background:var(--gold)"></span>заполняется</div>
+        <div class="tag"><span class="dot" style="background:var(--rust)"></span>переполнено</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ WHY IT COSTS MONEY ============ -->
+<section class="tight reveal">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Прежде чем считать</p>
+      <h2>Деньги теряются по двум разным причинам</h2>
+      <p>Это не одна проблема, а две зеркальные. И считать их нужно по-разному.</p>
+    </div>
+    <div class="why-grid">
+      <div class="why-card idle">
+        <svg class="icon" viewBox="0 0 44 44" fill="none"><rect x="10" y="16" width="24" height="16" rx="2" stroke="#5F7A52" stroke-width="2"/><path d="M14 16v-4a8 8 0 0116 0v4" stroke="#5F7A52" stroke-width="2"/><circle cx="22" cy="24" r="2" fill="#5F7A52"/></svg>
+        <h3>Пустое кресло стоит денег</h3>
+        <p>Аренда и зарплата мастера идут в любом случае — сидит в кресле клиент или нет. Если в
+          понедельник утром кресло пустует, вы ничего не экономите. Вы просто теряете прибыль,
+          которую могли бы получить, если бы кто-то в это время пришёл на услугу.</p>
+        <div class="formula-chip">Потеря = свободные места × прибыль с услуги</div>
+      </div>
+      <div class="why-card overflow">
+        <svg class="icon" viewBox="0 0 44 44" fill="none"><circle cx="14" cy="18" r="5" stroke="#A6472F" stroke-width="2"/><circle cx="28" cy="18" r="5" stroke="#A6472F" stroke-width="2"/><path d="M6 34c0-5 4-8 8-8s8 3 8 8M20 34c0-5 4-8 8-8s8 3 8 8" stroke="#A6472F" stroke-width="2"/></svg>
+        <h3>Очередь у двери — тоже потеря</h3>
+        <p>В субботу вечером все места заняты, а телефон продолжает звонить. Каждый, кому вы
+          отказали, — это тоже недополученные деньги, просто по обратной причине: спрос был,
+          а свободного времени не было.</p>
+        <div class="formula-chip">Потеря = отказанные заявки × прибыль с услуги</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ PARAMS ============ -->
+<section id="params" class="reveal">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Шаг 1</p>
+      <h2>Задайте параметры своего салона</h2>
+      <p>Это общие вводные — от них зависят все расчёты ниже. Начните со своих реальных цифр,
+        а дальше можно поиграть со значениями и посмотреть, что изменится.</p>
+    </div>
+    <div class="panel">
+      <div class="params-grid" id="paramsGrid"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ HEATMAP ============ -->
+<section class="reveal">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Шаг 2</p>
+      <h2>Недельная карта загрузки</h2>
+      <p>Потяните ползунок в любой ячейке, чтобы задать загрузку этого времени — от совсем
+        пустого до переполненного. Как только загрузка переходит порог «пиковой» (задан выше),
+        появляется возможность указать, сколько заявок пришлось отклонить.</p>
+    </div>
+    <div class="heatmap-wrap">
+      <div>
+        <div class="heatmap" id="heatmap"></div>
+        <div class="legend">
+          <div class="item"><span class="dot" style="background:var(--sage)"></span>свободно — теряем на простое</div>
+          <div class="item"><span class="dot" style="background:var(--gold)"></span>заполняется</div>
+          <div class="item"><span class="dot" style="background:var(--rust)"></span>пиковый — теряем на отказах</div>
+        </div>
+      </div>
+      <div>
+        <div class="receipt">
+          <h4>Итоги недели</h4>
+          <div class="receipt-row"><span class="label">Прибыль с 1 услуги</span><span class="amt mono" id="rMP">—</span></div>
+          <div class="receipt-row"><span class="label">Потеря от простоя</span><span class="amt mono" id="rIdle">—</span></div>
+          <div class="receipt-row"><span class="label">Потеря от переполнения</span><span class="amt mono" id="rOver">—</span></div>
+          <div class="receipt-row total"><span class="label">Итого теряется в неделю</span><span class="amt mono" id="rTotal">—</span></div>
+        </div>
+        <div class="receipt-torn"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SIMULATOR ============ -->
+<section class="reveal">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Шаг 3</p>
+      <h2>Симулятор переноса клиента</h2>
+      <p>Выберите, какого клиента переносим — из пикового времени в непиковое — и посмотрите,
+        при какой скидке это ещё выгодно салону, а при какой уже нет.</p>
+    </div>
+    <div class="panel">
+      <div class="sim-grid">
+        <div>
+          <div class="sim-slot-label">Переносим клиента ИЗ (пиковое время)</div>
+          <select id="fromSlot"></select>
+
+          <div class="sim-slot-label" style="margin-top:18px;">Переносим клиента В (свободное время)</div>
+          <select id="toSlot"></select>
+
+          <div class="field" style="margin-top:22px;">
+            <label>Вероятность, что освободившееся пиковое место тут же займёт другой клиент (p_fill)
+              <span class="val" id="pFillVal">—</span></label>
+            <input type="range" id="pFill" min="0" max="100" step="1">
+            <div class="hint">Чем выше спрос на пиковое время, тем ближе к 100% — место не будет пустовать.</div>
+          </div>
+
+          <div class="field" style="margin-top:18px;">
+            <label>Скидка, которую вы предлагаете клиенту
+              <span class="val" id="discVal">—</span></label>
+            <input type="range" id="discount" min="0" max="100" step="1">
+          </div>
+        </div>
+
+        <div>
+          <div class="verdict good" id="verdict">
+            <div class="vicon" id="vicon">✅</div>
+            <div class="vtext">
+              <strong id="vtitle">Выгодно</strong>
+              <p id="vdesc">—</p>
+            </div>
+          </div>
+          <div class="math-steps" id="mathSteps"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ AGENT ============ -->
+<section class="reveal">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Итог</p>
+      <h2>Как это использует ИИ-агент</h2>
+      <p>Всё, что вы только что покрутили руками, — это и есть правила, по которым агент ведёт
+        переговоры с клиентом автоматически.</p>
+    </div>
+    <div class="steps">
+      <div class="step-card">
+        <span class="step-num">01</span>
+        <h3>Смотрит на загрузку</h3>
+        <p>Проверяет, в какое время клиент записан, и является ли этот слот пиковым.</p>
+      </div>
+      <div class="step-card">
+        <span class="step-num">02</span>
+        <h3>Ищет замену</h3>
+        <p>Если p_fill высокий — есть кому занять освободившееся пиковое место — предлагает перенос.</p>
+      </div>
+      <div class="step-card">
+        <span class="step-num">03</span>
+        <h3>Торгуется аккуратно</h3>
+        <p>Начинает со стартовой скидки и поднимает её только до потолка — экономического или
+          установленного вами политикой, смотря что ниже.</p>
+      </div>
+      <div class="step-card">
+        <span class="step-num">04</span>
+        <h3>Обновляет карту</h3>
+        <p>Каждый успешный перенос меняет фактическую загрузку — и весь расчёт пересчитывается заново.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>Методология синхронизирована с рабочей Excel-моделью «Оптимизация загрузки салона».
+      Все цифры на странице — учебный пример; подставьте свои значения в параметрах, чтобы
+      увидеть реальную картину своего салона.</p>
+  </div>
+</footer>
+
+<script>
+(function(){
+  "use strict";
+
+  /* ---------------- DATA ---------------- */
+  const DAYS = ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"];
+  const DAYS_FULL = ["Понедельник","Вторник","Среда","Четверг","Пятница","Суббота","Воскресенье"];
+  const BLOCKS = [
+    {key:"morning", label:"Утро", hours:"9–13"},
+    {key:"day", label:"День", hours:"13–17"},
+    {key:"evening", label:"Вечер", hours:"17–21"}
+  ];
+
+  // seed loads/excess mirroring the companion Excel example
+  const seed = {
+    load: [
+      [20,35,50],[25,45,60],[30,50,65],[30,55,70],[40,65,95],[90,100,100],[60,95,80]
+    ],
+    excess: [
+      [0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,3],[2,5,4],[0,2,0]
+    ]
+  };
+
+  const state = {
+    avgCheck: 2000,
+    margin: 60,        // %
+    peakThreshold: 85, // %
+    defaultPfill: 85,  // %
+    policyCap: 20,      // %
+    capacity: 8,
+    slots: [] // {day, dayFull, block, blockLabel, hours, load, excess}
+  };
+
+  for(let d=0; d<7; d++){
+    for(let b=0; b<3; b++){
+      state.slots.push({
+        day: DAYS[d], dayFull: DAYS_FULL[d],
+        block: BLOCKS[b].key, blockLabel: BLOCKS[b].label, hours: BLOCKS[b].hours,
+        load: seed.load[d][b],
+        excess: seed.excess[d][b]
+      });
+    }
+  }
+
+  const fmtRub = n => Math.round(n).toLocaleString('ru-RU') + ' ₽';
+  const clamp = (v,a,b) => Math.max(a, Math.min(b,v));
+
+  function marginalProfit(){
+    return state.avgCheck * (state.margin/100);
+  }
+  function isPeak(load){ return load >= state.peakThreshold; }
+
+  function colorFor(load){
+    if(load >= state.peakThreshold) return {bg:'var(--rust-soft)', fg:'var(--rust)'};
+    if(load >= state.peakThreshold*0.6) return {bg:'var(--gold-soft)', fg:'#8a651f'};
+    return {bg:'var(--sage-soft)', fg:'var(--sage)'};
+  }
+  function dotColor(load){
+    if(load >= state.peakThreshold) return 'var(--rust)';
+    if(load >= state.peakThreshold*0.6) return 'var(--gold)';
+    return 'var(--sage)';
+  }
+
+  /* ---------------- PARAMS PANEL ---------------- */
+  const paramsGrid = document.getElementById('paramsGrid');
+  const paramDefs = [
+    {key:'avgCheck', label:'Средний чек', min:500, max:6000, step:50, unit:'₽', hint:'Средняя стоимость услуги в вашем салоне.'},
+    {key:'margin', label:'Маржинальность', min:20, max:90, step:1, unit:'%', hint:'Доля чека после расходников и % мастеру — без учёта аренды, она платится всегда.'},
+    {key:'peakThreshold', label:'Порог «пикового» времени', min:60, max:100, step:1, unit:'%', hint:'Выше этой загрузки время считается пиковым.'},
+    {key:'defaultPfill', label:'p_fill по умолчанию', min:0, max:100, step:1, unit:'%', hint:'Шанс, что освободившееся пиковое место тут же займут.'},
+    {key:'policyCap', label:'Потолок скидки (политика)', min:0, max:100, step:1, unit:'%', hint:'Скидка не должна превышать это значение, даже если математика разрешает больше.'}
+  ];
+  paramDefs.forEach(p=>{
+    const field = document.createElement('div');
+    field.className='field';
+    field.innerHTML = `
+      <label>${p.label} <span class="val">${state[p.key]}${p.unit}</span></label>
+      <input type="range" min="${p.min}" max="${p.max}" step="${p.step}" value="${state[p.key]}" data-key="${p.key}">
+      <div class="hint">${p.hint}</div>
+    `;
+    paramsGrid.appendChild(field);
+    const input = field.querySelector('input');
+    const valSpan = field.querySelector('.val');
+    input.addEventListener('input', ()=>{
+      state[p.key] = Number(input.value);
+      valSpan.textContent = input.value + p.unit;
+      renderAll();
+    });
+  });
+
+  /* ---------------- HERO MINI CALENDAR (decorative, live) ---------------- */
+  const miniCal = document.getElementById('miniCal');
+  function renderMiniCal(){
+    miniCal.innerHTML='';
+    DAYS.forEach(d=>{
+      const lbl = document.createElement('div');
+      lbl.className='day-label'; lbl.textContent=d;
+      miniCal.appendChild(lbl);
+    });
+    for(let b=0;b<3;b++){
+      for(let d=0;d<7;d++){
+        const s = state.slots[d*3+b];
+        const cell = document.createElement('div');
+        cell.className='mini-cell';
+        cell.style.background = dotColor(s.load);
+        cell.style.opacity = 0.85;
+        miniCal.appendChild(cell);
+      }
+    }
+  }
+
+  /* ---------------- HEATMAP ---------------- */
+  const heatmap = document.getElementById('heatmap');
+  function renderHeatmap(){
+    heatmap.innerHTML='';
+    DAYS_FULL.forEach(d=>{
+      const l = document.createElement('div');
+      l.className='heat-daylabel'; l.textContent=d.slice(0,3);
+      heatmap.appendChild(l);
+    });
+    for(let b=0;b<3;b++){
+      for(let d=0;d<7;d++){
+        const idx = d*3+b;
+        const s = state.slots[idx];
+        const col = colorFor(s.load);
+        const cell = document.createElement('div');
+        cell.className='heat-cell';
+        cell.style.background = 'var(--card)';
+        const peak = isPeak(s.load);
+        cell.innerHTML = `
+          <div class="heat-block">${s.blockLabel} · ${s.hours}</div>
+          <div class="heat-load" style="background:${col.bg}; color:${col.fg}">${s.load}%</div>
+          <input type="range" min="0" max="120" step="5" value="${s.load}" data-idx="${idx}" class="loadRange">
+          ${peak ? `<div class="heat-excess"><span>отказано: ${s.excess}</span>
+            <span style="display:flex;gap:3px;">
+              <button data-idx="${idx}" data-dir="-1" type="button">−</button>
+              <button data-idx="${idx}" data-dir="1" type="button">+</button>
+            </span></div>` : `<div class="heat-excess" style="visibility:hidden">·</div>`}
+        `;
+        heatmap.appendChild(cell);
+      }
+    }
+    heatmap.querySelectorAll('.loadRange').forEach(inp=>{
+      inp.addEventListener('input', e=>{
+        const idx = Number(e.target.dataset.idx);
+        state.slots[idx].load = Number(e.target.value);
+        renderAll();
+      });
+    });
+    heatmap.querySelectorAll('.heat-excess button').forEach(btn=>{
+      btn.addEventListener('click', e=>{
+        const idx = Number(e.target.dataset.idx);
+        const dir = Number(e.target.dataset.dir);
+        state.slots[idx].excess = Math.max(0, state.slots[idx].excess + dir);
+        renderAll();
+      });
+    });
+  }
+
+  /* ---------------- TOTALS RECEIPT ---------------- */
+  function renderTotals(){
+    const mp = marginalProfit();
+    let idleTotal=0, overTotal=0;
+    state.slots.forEach(s=>{
+      const occupied = state.capacity * (s.load/100);
+      const free = Math.max(state.capacity - occupied, 0);
+      if(isPeak(s.load)){
+        overTotal += s.excess * mp;
+      } else {
+        idleTotal += free * mp;
+      }
+    });
+    document.getElementById('rMP').textContent = fmtRub(mp);
+    document.getElementById('rIdle').textContent = fmtRub(idleTotal);
+    document.getElementById('rOver').textContent = fmtRub(overTotal);
+    document.getElementById('rTotal').textContent = fmtRub(idleTotal+overTotal);
+  }
+
+  /* ---------------- SIMULATOR ---------------- */
+  const fromSelect = document.getElementById('fromSlot');
+  const toSelect = document.getElementById('toSlot');
+  const pFillInput = document.getElementById('pFill');
+  const discInput = document.getElementById('discount');
+  const pFillVal = document.getElementById('pFillVal');
+  const discVal = document.getElementById('discVal');
+
+  let simInit = false;
+  function populateSimSelects(){
+    const peakSlots = state.slots.filter(s=>isPeak(s.load));
+    const nonpeakSlots = state.slots.filter(s=>!isPeak(s.load));
+
+    const prevFrom = fromSelect.value;
+    const prevTo = toSelect.value;
+
+    fromSelect.innerHTML = peakSlots.map(s=>{
+      const label = `${s.dayFull}, ${s.blockLabel} (${s.hours}) — загрузка ${s.load}%`;
+      return `<option value="${s.day}-${s.block}">${label}</option>`;
+    }).join('') || `<option value="">Нет пиковых слотов — снизьте порог или загрузку</option>`;
+
+    toSelect.innerHTML = nonpeakSlots.map(s=>{
+      const label = `${s.dayFull}, ${s.blockLabel} (${s.hours}) — загрузка ${s.load}%`;
+      return `<option value="${s.day}-${s.block}">${label}</option>`;
+    }).join('') || `<option value="">Нет свободных слотов</option>`;
+
+    if(!simInit){
+      pFillInput.value = state.defaultPfill;
+      discInput.value = 10;
+      simInit = true;
+    }
+    if(peakSlots.some(s=>`${s.day}-${s.block}`===prevFrom)) fromSelect.value = prevFrom;
+    if(nonpeakSlots.some(s=>`${s.day}-${s.block}`===prevTo)) toSelect.value = prevTo;
+  }
+
+  function findSlot(val){
+    if(!val) return null;
+    const [day, block] = val.split('-');
+    return state.slots.find(s=>s.day===day && s.block===block) || null;
+  }
+
+  function renderSimulator(){
+    populateSimSelects();
+    pFillVal.textContent = pFillInput.value + '%';
+    discVal.textContent = discInput.value + '%';
+
+    const from = findSlot(fromSelect.value);
+    const to = findSlot(toSelect.value);
+    const verdict = document.getElementById('verdict');
+    const vicon = document.getElementById('vicon');
+    const vtitle = document.getElementById('vtitle');
+    const vdesc = document.getElementById('vdesc');
+    const mathSteps = document.getElementById('mathSteps');
+
+    if(!from || !to){
+      verdict.className='verdict warn';
+      vicon.textContent='—';
+      vtitle.textContent='Недостаточно данных';
+      vdesc.textContent='Нужен хотя бы один пиковый и один непиковый слот на карте загрузки выше.';
+      mathSteps.innerHTML='';
+      return;
+    }
+
+    const mp = marginalProfit();
+    const pFill = Number(pFillInput.value)/100;
+    const disc = Number(discInput.value)/100;
+    const price = state.avgCheck;
+
+    const rawValue = pFill*mp + mp; // MPfrom + MPto (uniform economics)
+    const dmaxRaw = rawValue/price;
+    const dmax = clamp(dmaxRaw, 0, 1);
+    const policyCap = state.policyCap/100;
+    const practicalCap = Math.min(dmax, policyCap);
+    const netRub = rawValue - price*disc;
+
+    if(disc <= practicalCap){
+      verdict.className='verdict good';
+      vicon.textContent='✅';
+      vtitle.textContent='Выгодно и в рамках политики';
+      vdesc.textContent = `Салон получает примерно ${fmtRub(netRub)} чистой выгоды с этого переноса, и скидка не превышает ваш потолок.`;
+    } else if(disc <= dmax){
+      verdict.className='verdict warn';
+      vicon.textContent='⚠️';
+      vtitle.textContent='Математически выгодно, но выше вашей политики';
+      vdesc.textContent = `Экономика допускает скидку до ${(dmax*100).toFixed(0)}%, но вы ограничили себя ${state.policyCap}% — агент не должен предлагать больше.`;
+    } else {
+      verdict.className='verdict bad';
+      vicon.textContent='❌';
+      vtitle.textContent='Невыгодно';
+      vdesc.textContent = `При такой скидке салон теряет около ${fmtRub(Math.abs(netRub))}. Максимум, который ещё имеет смысл — ${(dmax*100).toFixed(0)}%.`;
+    }
+
+    mathSteps.innerHTML = `
+      <div><span class="step-label">Прибыль с услуги (МП) = </span>${fmtRub(state.avgCheck)} × ${state.margin}% = <b>${fmtRub(mp)}</b></div>
+      <div><span class="step-label">Ценность переноса = </span>p_fill × МП(откуда) + МП(куда) = ${(pFill*100).toFixed(0)}% × ${fmtRub(mp)} + ${fmtRub(mp)} = <b>${fmtRub(rawValue)}</b></div>
+      <div><span class="step-label">Экономический d_max = </span>${fmtRub(rawValue)} / ${fmtRub(price)} = <b>${(dmax*100).toFixed(0)}%</b> (не выше 100%)</div>
+      <div><span class="step-label">Практический потолок = </span>min(${(dmax*100).toFixed(0)}%, ${state.policyCap}% политики) = <b>${(practicalCap*100).toFixed(0)}%</b></div>
+      <div><span class="step-label">Предложенная скидка = </span><b>${(disc*100).toFixed(0)}%</b> → стоимость скидки ${fmtRub(price*disc)}</div>
+      <div><span class="step-label">Чистый эффект для салона = </span>${fmtRub(rawValue)} − ${fmtRub(price*disc)} = <b>${fmtRub(netRub)}</b></div>
+    `;
+  }
+
+  [pFillInput, discInput, fromSelect, toSelect].forEach(el=>{
+    el.addEventListener('input', renderSimulator);
+    el.addEventListener('change', renderSimulator);
+  });
+
+  /* ---------------- RENDER ALL ---------------- */
+  function renderAll(){
+    renderMiniCal();
+    renderHeatmap();
+    renderTotals();
+    renderSimulator();
+  }
+  renderAll();
+
+  /* ---------------- REVEAL ON SCROLL ---------------- */
+  const io = new IntersectionObserver((entries)=>{
+    entries.forEach(e=>{ if(e.isIntersecting){ e.target.classList.add('in'); io.unobserve(e.target);} });
+  }, {threshold:0.12});
+  document.querySelectorAll('.reveal').forEach(el=>io.observe(el));
+
+})();
+</script>
+</body>
+</html>

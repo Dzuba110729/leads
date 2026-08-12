@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.session
+*.session-journal
+*.db
+.env
+.git/
+.scratch/
+materials/
+tests/
+og1/

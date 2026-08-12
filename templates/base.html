@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}og1 CRM{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/vendor/htmx.min.js" defer></script>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="logo-dot">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M4 12l8-6 8 6-8 6-8-6z" stroke="white" stroke-width="2" stroke-linejoin="round"/><path d="M8 14v4c0 1 1.8 2 4 2s4-1 4-2v-4" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+        og1 CRM
+      </div>
+      <a class="nav-item {% if active == 'dashboard' %}active{% endif %}" href="/">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="8" height="8" rx="2" stroke="currentColor" stroke-width="2"/><rect x="13" y="3" width="8" height="5" rx="2" stroke="currentColor" stroke-width="2"/><rect x="13" y="12" width="8" height="9" rx="2" stroke="currentColor" stroke-width="2"/><rect x="3" y="15" width="8" height="6" rx="2" stroke="currentColor" stroke-width="2"/></svg>
+        Дашборд
+      </a>
+      <a class="nav-item {% if active == 'orders' %}active{% endif %}" href="/orders">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M5 4h14v16l-3-2-2 2-2-2-2 2-2-2-3 2V4z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M8 9h8M8 13h5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        Заявки
+      </a>
+      <a class="nav-item {% if active == 'catcher' %}active{% endif %}" href="/catcher">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><circle cx="10" cy="10" r="6" stroke="currentColor" stroke-width="2"/><path d="M15 15l5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        Ловец лидов
+      </a>
+      {% if username %}
+      <form class="nav-logout" method="post" action="/logout">
+        <span class="nav-user">{{ username }}</span>
+        <button type="submit" class="nav-item nav-logout-btn">Выйти</button>
+      </form>
+      {% endif %}
+    </aside>
+    <main class="main">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</body>
+</html>

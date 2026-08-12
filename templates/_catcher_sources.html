@@ -1,0 +1,9 @@
+{% if sources %}
+<div class="list" id="sources-list">
+  {% for s in sources %}
+  {% include "_catcher_source_row.html" %}
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty-state" id="sources-list">Источников пока нет — добавьте чат или группу выше.</div>
+{% endif %}

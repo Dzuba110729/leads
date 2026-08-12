@@ -1,0 +1,17 @@
+services:
+  og1:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DB_PATH=/data/og1_leads.db
+      - CRM_HOST=0.0.0.0
+    volumes:
+      - og1_data:/data
+    # Порт публикуется только на loopback — снаружи контейнер доступен
+    # исключительно через `tailscale serve` на хосте (см. README), не напрямую.
+    ports:
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  og1_data:
