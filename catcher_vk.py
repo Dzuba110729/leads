@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 
 import vk_api
 from vk_api.exceptions import ApiError
@@ -46,6 +47,9 @@ def fetch_new_messages(conn, source) -> int:
     vk = session.get_api()
     domain = _group_short_name(source["url"])
     last_seen_id = int(source["last_message_id"]) if source["last_message_id"] else 0
+    # VK отдаёт посты от новых к старым - при первой выгрузке (last_seen_id=0) без отсечки
+    # по дате пагинация ушла бы в историю сообщества с момента создания
+    cutoff_ts = int((datetime.now(timezone.utc) - timedelta(days=CONFIG.catcher_max_message_age_days)).timestamp())
 
     fetched = 0
     max_seen_id = last_seen_id
@@ -59,6 +63,9 @@ def fetch_new_messages(conn, source) -> int:
             break
         for post in items:
             if post["id"] <= last_seen_id:
+                stop = True
+                break
+            if post.get("date", 0) < cutoff_ts:
                 stop = True
                 break
             text = post.get("text", "")

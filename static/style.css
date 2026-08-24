@@ -313,6 +313,22 @@ input, select {
 }
 .order-card form { margin: 0; }
 .order-card button { width: 100%; }
+.order-card .order-contact-link {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+}
+.order-card .order-contact-link:hover { text-decoration: underline; }
+.order-card .order-contact-missing {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+}
 
 .empty-state {
   color: var(--text-muted);
@@ -407,6 +423,15 @@ input, select {
   justify-content: space-between;
   gap: 10px;
 }
+.candidate-card .row.candidate-links {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.candidate-card .row.candidate-links a { color: var(--accent); text-decoration: none; }
+.candidate-card .row.candidate-links a:hover { text-decoration: underline; }
 
 .hint {
   color: var(--text-muted);

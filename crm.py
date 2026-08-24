@@ -74,9 +74,21 @@ def _price_label(price: float | None) -> str:
     return f"{price:,.0f} ₽".replace(",", " ") if price else "по запросу"
 
 
+def _lead_contact_link(o) -> str | None:
+    keys = o.keys() if hasattr(o, "keys") else o
+    username = o["lead_username"] if "lead_username" in keys else None
+    tg_id = o["lead_tg_id"] if "lead_tg_id" in keys else None
+    if username:
+        return f"https://t.me/{username}"
+    if tg_id:
+        return f"tg://user?id={tg_id}"
+    return None
+
+
 def _order_dict(o) -> dict:
     d = dict(o)
     d["price_label"] = _price_label(o["price"])
+    d["lead_contact_link"] = _lead_contact_link(o)
     return d
 
 
@@ -199,12 +211,20 @@ async def reset(request: Request) -> dict:
 
 # --- /catcher: автовыгрузка чатов для шага 1 «Ловец лидов» -------------------------------------
 
+def _catcher_candidate_dict(c) -> dict:
+    d = dict(c)
+    username = d.get("author_username")
+    tg_id = d.get("author_tg_id")
+    d["lead_link"] = f"https://t.me/{username}" if username else (f"tg://user?id={tg_id}" if tg_id else None)
+    return d
+
+
 @app.get("/catcher")
 async def catcher_index(request: Request):
     with db.session() as conn:
         catcher_db.migrate(conn)
         sources = catcher_db.list_sources(conn)
-        candidates = catcher_db.list_candidates(conn)
+        candidates = [_catcher_candidate_dict(c) for c in catcher_db.list_candidates(conn)]
     context = {
         "request": request,
         "active": "catcher",
@@ -278,9 +298,8 @@ async def catcher_mark_contacted(request: Request, candidate_id: int):
     with db.session() as conn:
         catcher_db.migrate(conn)
         catcher_db.mark_contacted(conn, candidate_id)
-        candidate = conn.execute(
-            "SELECT * FROM catch_candidates WHERE id = ?", (candidate_id,)
-        ).fetchone()
+        candidate = next((c for c in catcher_db.list_candidates(conn) if c["id"] == candidate_id), None)
+        candidate = _catcher_candidate_dict(candidate) if candidate else None
 
     if _is_htmx(request):
         return templates.TemplateResponse(request, "_catcher_candidate_card.html", {"request": request, "c": candidate}

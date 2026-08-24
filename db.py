@@ -27,7 +27,8 @@ SCHEMA: dict[str, str] = {
             first_seen_at TEXT NOT NULL,
             last_seen_at TEXT NOT NULL,
             blocked INTEGER NOT NULL DEFAULT 0,
-            block_reason TEXT
+            block_reason TEXT,
+            dialog_context TEXT
         )
     """,
     "orders": """
@@ -76,7 +77,7 @@ SCHEMA: dict[str, str] = {
 # Колонки, которые могли появиться позже — для идемпотентной эволюции схемы
 # (таблица -> {колонка: DDL-фрагмент типа/дефолта})
 ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
-    "leads": {},
+    "leads": {"dialog_context": "TEXT"},
     "orders": {},
     "handoff": {},
     "meta": {},
@@ -145,6 +146,23 @@ def get_or_create_lead(conn: sqlite3.Connection, tg_id: int, username: str | Non
         (tg_id, username, source, ts, ts),
     )
     return conn.execute("SELECT * FROM leads WHERE id = ?", (cur.lastrowid,)).fetchone()
+
+
+# Сколько последних реплик держим в dialog_context (не вся история, см. SCORING_SYSTEM_PROMPT:
+# "не помнить между вызовами" - это скользящее окно контекста, а не картотека).
+DIALOG_CONTEXT_MAX_TURNS = 12
+
+
+def append_dialog_context(conn: sqlite3.Connection, lead_id: int, role: str, text: str) -> str:
+    """Добавляет реплику в dialog_context лида, обрезая до последних DIALOG_CONTEXT_MAX_TURNS. Возвращает новый контекст."""
+    row = conn.execute("SELECT dialog_context FROM leads WHERE id = ?", (lead_id,)).fetchone()
+    lines = (row["dialog_context"] or "").split("\n") if row and row["dialog_context"] else []
+    lines = [l for l in lines if l]
+    lines.append(f"{role}: {text}")
+    lines = lines[-DIALOG_CONTEXT_MAX_TURNS:]
+    context = "\n".join(lines)
+    conn.execute("UPDATE leads SET dialog_context = ? WHERE id = ?", (context, lead_id))
+    return context
 
 
 def block_lead(conn: sqlite3.Connection, lead_id: int, reason: str) -> None:
@@ -235,7 +253,15 @@ def close_order(conn: sqlite3.Connection, order_id: int) -> None:
 
 
 def list_open_orders(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    return conn.execute("SELECT * FROM orders WHERE closed = 0 ORDER BY created_at DESC").fetchall()
+    return conn.execute(
+        """
+        SELECT orders.*, leads.tg_id AS lead_tg_id, leads.username AS lead_username
+        FROM orders
+        JOIN leads ON leads.id = orders.lead_id
+        WHERE orders.closed = 0
+        ORDER BY orders.created_at DESC
+        """
+    ).fetchall()
 
 
 def list_orders_for_reminders(conn: sqlite3.Connection) -> list[sqlite3.Row]:

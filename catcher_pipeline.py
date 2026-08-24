@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 
@@ -65,10 +66,15 @@ def run_p1_on_batch(messages: list) -> list[dict]:
         return []
     system_prompt = P1_SYSTEM_PROMPT.format(icp=ICP_OG1)
     batch_text = _format_batch(messages)
-    result = llm.call_text(system_prompt, batch_text, max_tokens=2000)
+    result = llm.call_text(system_prompt, batch_text, max_tokens=8192)
     if result:
+        cleaned = result.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:]
         try:
-            candidates = json.loads(result)
+            candidates = json.loads(cleaned)
             if isinstance(candidates, list):
                 return candidates
         except json.JSONDecodeError:
@@ -91,15 +97,33 @@ def run_p1_on_batch(messages: list) -> list[dict]:
     return candidates
 
 
+def _find_matching_message_id(quote: str, messages: list) -> int | None:
+    """Ищет сообщение по цитате LLM. LLM иногда слегка перефразирует/склеивает соседние
+    сообщения, поэтому точное равенство слишком хрупкое - сначала пробуем подстроку в обе
+    стороны, потом нечёткое сравнение (защита от полностью выдуманных цитат остаётся -
+    порог 0.6 достаточно строгий, чтобы не пропустить то, чего в чате не было)."""
+    quote_norm = " ".join(quote.split())
+    if not quote_norm:
+        return None
+    best_id, best_ratio = None, 0.0
+    for m in messages:
+        text_norm = " ".join(m["text"].split())
+        if quote_norm in text_norm or text_norm in quote_norm:
+            return m["id"]
+        ratio = difflib.SequenceMatcher(None, quote_norm, text_norm).ratio()
+        if ratio > best_ratio:
+            best_id, best_ratio = m["id"], ratio
+    return best_id if best_ratio >= 0.6 else None
+
+
 def process_source(conn, source_chat_id: int) -> int:
     """Прогоняет П1 над необработанными сообщениями источника, создаёт кандидатов.
     Возвращает число найденных кандидатов."""
     messages = catcher_db.unprocessed_messages_for_source(conn, source_chat_id)
     candidates = run_p1_on_batch(list(messages))
-    by_text = {m["text"]: m["id"] for m in messages}
     created = 0
     for c in candidates:
-        raw_message_id = by_text.get(c.get("quote", ""))
+        raw_message_id = _find_matching_message_id(c.get("quote", ""), messages)
         if raw_message_id is None:
             continue  # П1 не должен выдумывать цитаты вне входного текста - пропускаем несовпавшее
         catcher_db.add_candidate(
@@ -111,4 +135,5 @@ def process_source(conn, source_chat_id: int) -> int:
             opener_text=c.get("opener_text", ""),
         )
         created += 1
+    catcher_db.mark_messages_processed(conn, [m["id"] for m in messages])
     return created

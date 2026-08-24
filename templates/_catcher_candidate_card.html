@@ -2,12 +2,18 @@
   <blockquote>{{ c['quote'] }}</blockquote>
   <div class="reason">{{ c['reason'] }}</div>
   <div class="opener">{{ c['opener_text'] }}</div>
-  <div class="row">
+  <div class="row candidate-links">
+    {% if c['lead_link'] %}
+    <a href="{{ c['lead_link'] }}" target="_blank" rel="noopener">Написать лиду ↗</a>
+    {% else %}
+    <span class="hint" style="margin-top:0">Нет контакта лида</span>
+    {% endif %}
+    <a href="{{ c['message_url'] }}" target="_blank" rel="noopener">Сообщение в чате ↗</a>
     {% if c['contact_url'] %}
     <a href="{{ c['contact_url'] }}" target="_blank" rel="noopener">Перейти к диалогу →</a>
-    {% else %}
-    <span class="hint" style="margin-top:0">Ссылки нет</span>
     {% endif %}
+  </div>
+  <div class="row">
     {% if c['status'] == 'contacted' %}
     <span class="pill" style="background: var(--status-оплачено)">написал</span>
     {% else %}

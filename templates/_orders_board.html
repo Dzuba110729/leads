@@ -11,6 +11,11 @@
       <div class="order-tariff">{{ o['tariff'] }}</div>
       <div class="order-meta">Лид #{{ o['lead_id'] }} · {{ o['department'] }}</div>
       <div class="order-price">{{ o['price_label'] }}</div>
+      {% if o['lead_contact_link'] %}
+      <a href="{{ o['lead_contact_link'] }}" target="_blank" rel="noopener" class="order-contact-link">Написать лиду ↗</a>
+      {% else %}
+      <div class="order-contact-missing">Нет контакта лида</div>
+      {% endif %}
       {% if col.status != 'зачислен' %}
       <form hx-post="/orders/{{ o['id'] }}/advance" hx-target="#board" hx-swap="innerHTML">
         <button type="submit">Сдвинуть статус →</button>

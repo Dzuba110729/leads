@@ -33,6 +33,8 @@ async def handle_incoming(event, source: str) -> None:
         return
 
     sender = await event.get_sender()
+    if getattr(sender, "bot", False):
+        return  # игнорируем других ботов (напр. свою же переписку userbot'а с ботом-кассиром)
     tg_id = sender.id
     username = getattr(sender, "username", None)
 
@@ -46,6 +48,7 @@ async def handle_incoming(event, source: str) -> None:
         lead = db.get_or_create_lead(conn, tg_id, username, source=source)
         if lead["blocked"]:
             return
+        dialog_context = db.append_dialog_context(conn, lead["id"], "лид", text)
 
     # Шаг 8: защита от инъекций - до любого другого LLM-вызова
     guard_result = guard.check(text)
@@ -67,11 +70,11 @@ async def handle_incoming(event, source: str) -> None:
             answer = pipeline.status_answer(order["tariff"], order["status"])
         else:
             answer = "Пока не вижу активных заявок по вашему аккаунту. Если уже подавали заявку - уточните у менеджера."
-        await _reply(event, answer)
+        await _reply(event, answer, lead_id=lead["id"])
         return
 
-    # Шаг 2.3: скоринг П1
-    score_result = pipeline.score_message(text)
+    # Шаг 2.3: скоринг П1 - с учётом контекста диалога, не только последней реплики
+    score_result = pipeline.score_message(dialog_context)
     logger.info(
         "SCORE lead=%s score=%s band=%s source=%s reasoning=%s",
         tg_id, score_result.score, score_result.band, score_result.source, score_result.reasoning,
@@ -81,23 +84,15 @@ async def handle_incoming(event, source: str) -> None:
         return  # молчим
 
     if score_result.band == "very_hot":
-        await _escalate(event, lead, text, score_result)
+        await _escalate(event, lead, dialog_context, score_result)
         return
 
-    # тёплый/горячий - касание П5
-    with db.session() as conn:
-        lead_row = conn.execute("SELECT * FROM leads WHERE id = ?", (lead["id"],)).fetchone()
-
-    if lead_row["last_touch_at"]:
-        from datetime import datetime, timezone
-        last_touch = datetime.fromisoformat(lead_row["last_touch_at"])
-        gap_hours = (datetime.now(timezone.utc) - last_touch).total_seconds() / 3600
-        if gap_hours < CONFIG.min_touch_gap_hours:
-            return  # story 17: минимальный зазор между касаниями
-
+    # тёплый/горячий - касание П5. min_touch_gap_hours здесь НЕ применяется: это живой ответ
+    # на входящее сообщение лида (шаг 2 методики - отвечаем на каждое сообщение по баллу), а не
+    # проактивный прогрев затихших (шаг 3, daily_warmup_task) - там зазор по-прежнему действует.
     funnel_stage = "интерес"  # PLACEHOLDER: воронка не детализирована пользователем (см. og1/PLAN.md п.6)
-    touch = pipeline.generate_touch(score_result.band, funnel_stage, text)
-    await _reply(event, touch)
+    touch = pipeline.generate_touch(score_result.band, funnel_stage, dialog_context)
+    await _reply(event, touch, lead_id=lead["id"])
     with db.session() as conn:
         db.record_touch(conn, lead["id"], next_step_idx=0)
 
@@ -118,10 +113,13 @@ async def _escalate(event, lead, dialog_text: str, score_result: pipeline.ScoreR
 
     logger.info("ESCALATE lead=%s order=%s tariff=%s", lead["tg_id"], order["id"], extracted.tariff_name)
     link = bot_module.deep_link_for_order(order["id"])
-    await _reply(event, f"Похоже, вы готовы двигаться дальше! Продолжим здесь: {link}")
+    await _reply(event, f"Похоже, вы готовы двигаться дальше! Продолжим здесь: [бот-менеджер]({link})", lead_id=lead["id"])
 
 
-async def _reply(event, text: str) -> None:
+async def _reply(event, text: str, lead_id: int | None = None) -> None:
+    if lead_id is not None:
+        with db.session() as conn:
+            db.append_dialog_context(conn, lead_id, "бот", text)
     if CONFIG.dry_run:
         logger.info("[DRY_RUN] would reply: %s", text)
         return
@@ -133,19 +131,22 @@ async def daily_warmup_task() -> None:
         logger.info("scheduler disabled (SCHEDULER_ENABLED=0), warmup loop not started")
         return
     while True:
-        with db.session() as conn:
-            leads = db.active_leads_for_warmup(conn)
-            for lead in leads:
-                from datetime import datetime, timezone
-                if not lead["last_touch_at"]:
-                    continue
-                last_touch = datetime.fromisoformat(lead["last_touch_at"])
-                silence_days = (datetime.now(timezone.utc) - last_touch).days
-                text = pipeline.warmup_step_text(silence_days)
-                if text is None:
-                    continue
-                logger.info("[DRY_RUN warmup] lead=%s silence=%sd text=%s", lead["tg_id"], silence_days, text)
-                db.record_touch(conn, lead["id"], next_step_idx=lead["next_step_idx"] + 1)
+        try:
+            with db.session() as conn:
+                leads = db.active_leads_for_warmup(conn)
+                for lead in leads:
+                    from datetime import datetime, timezone
+                    if not lead["last_touch_at"]:
+                        continue
+                    last_touch = datetime.fromisoformat(lead["last_touch_at"])
+                    silence_days = (datetime.now(timezone.utc) - last_touch).days
+                    text = pipeline.warmup_step_text(silence_days)
+                    if text is None:
+                        continue
+                    logger.info("[DRY_RUN warmup] lead=%s silence=%sd text=%s", lead["tg_id"], silence_days, text)
+                    db.record_touch(conn, lead["id"], next_step_idx=lead["next_step_idx"] + 1)
+        except Exception:
+            logger.exception("daily_warmup_task iteration failed")
         await asyncio.sleep(24 * 3600)
 
 

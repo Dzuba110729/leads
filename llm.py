@@ -24,7 +24,7 @@ def _get_client():
     return _client
 
 
-def call_json(system_prompt: str, user_message: str, max_tokens: int = 300) -> dict | None:
+def call_json(system_prompt: str, user_message: str, max_tokens: int = 1024) -> dict | None:
     """Вызывает LLM, ожидает JSON-ответ. Возвращает None при отсутствии ключа или ошибке."""
     if not available():
         return None
@@ -47,7 +47,7 @@ def call_json(system_prompt: str, user_message: str, max_tokens: int = 300) -> d
         return None
 
 
-def call_text(system_prompt: str, user_message: str, max_tokens: int = 400) -> str | None:
+def call_text(system_prompt: str, user_message: str, max_tokens: int = 1024) -> str | None:
     if not available():
         return None
     try:

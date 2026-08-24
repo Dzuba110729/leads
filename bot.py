@@ -75,9 +75,13 @@ async def handle_handoff(callback: CallbackQuery, bot: Bot) -> None:
     await callback.answer()
 
     if CONFIG.operator_chat and not CONFIG.dry_run:
+        contact_link = "—"
+        if lead:
+            contact_link = f"https://t.me/{lead['username']}" if lead["username"] else f"tg://user?id={lead['tg_id']}"
         card = OPERATOR_CARD_TEMPLATE.format(
             username=(lead["username"] or "без username") if lead else "?",
             tg_id=lead["tg_id"] if lead else "?",
+            contact_link=contact_link,
             tariff=order["tariff"],
             price_label=price_label,
             department=order["department"],
