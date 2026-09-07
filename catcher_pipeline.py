@@ -73,6 +73,11 @@ def run_p1_on_batch(messages: list) -> list[dict]:
             cleaned = cleaned.strip("`")
             if cleaned.startswith("json"):
                 cleaned = cleaned[4:]
+        # Модель иногда добавляет текст до/после массива вопреки инструкции - вырезаем
+        # содержимое между первой '[' и последней ']', а не требуем идеально чистый JSON.
+        start, end = cleaned.find("["), cleaned.rfind("]")
+        if start != -1 and end != -1 and end > start:
+            cleaned = cleaned[start:end + 1]
         try:
             candidates = json.loads(cleaned)
             if isinstance(candidates, list):
