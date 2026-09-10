@@ -7,7 +7,10 @@
   </span>
   <div class="row-actions">
     <form hx-post="/catcher/sources/{{ s['id'] }}/fetch" hx-target="#source-{{ s['id'] }}" hx-swap="outerHTML">
-      <button type="submit">Выгрузить сейчас</button>
+      <button type="submit" hx-disabled-elt="this" hx-indicator="this">
+        <span class="btn-label">Выгрузить сейчас</span>
+        <span class="btn-loading htmx-indicator">Идёт выгрузка…</span>
+      </button>
     </form>
     <form hx-post="/catcher/sources/{{ s['id'] }}/toggle" hx-target="#source-{{ s['id'] }}" hx-swap="outerHTML">
       <button type="submit">{{ 'Выключить' if s['enabled'] else 'Включить' }}</button>

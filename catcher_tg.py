@@ -49,7 +49,7 @@ async def fetch_new_messages(conn, source) -> int:
         while True:
             try:
                 async for message in client.iter_messages(
-                    entity, offset_id=offset_id, offset_date=offset_date, reverse=True, limit=200
+                    entity, offset_id=offset_id, offset_date=offset_date, reverse=True, limit=None
                 ):
                     if not message.text:
                         continue

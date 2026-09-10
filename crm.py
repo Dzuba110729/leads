@@ -268,7 +268,9 @@ async def catcher_toggle_source(request: Request, source_id: int):
 
 @app.post("/catcher/sources/{source_id}/fetch")
 async def catcher_fetch(request: Request, source_id: int):
-    """Синхронный вызов «Выгрузить сейчас» — без фоновой очереди (MVP-решение по спеке)."""
+    """«Выгрузить сейчас»: сама выгрузка идёт на event loop (Telethon и так асинхронный),
+    а прогон через LLM — в отдельном потоке со своим sqlite-соединением, чтобы синхронные
+    вызовы Anthropic (их может быть много на большой пачке) не морозили весь сервер CRM."""
     with db.session() as conn:
         catcher_db.migrate(conn)
         source = catcher_db.get_source(conn, source_id)
@@ -284,7 +286,13 @@ async def catcher_fetch(request: Request, source_id: int):
 
             await asyncio.to_thread(catcher_vk.fetch_new_messages, conn, source)
 
-        catcher_pipeline.process_source(conn, source_id)
+    def _run_pipeline() -> None:
+        with db.session() as thread_conn:
+            catcher_pipeline.process_source(thread_conn, source_id)
+
+    await asyncio.to_thread(_run_pipeline)
+
+    with db.session() as conn:
         source = catcher_db.get_source(conn, source_id)
 
     if _is_htmx(request):

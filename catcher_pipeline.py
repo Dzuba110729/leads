@@ -121,24 +121,30 @@ def _find_matching_message_id(quote: str, messages: list) -> int | None:
     return best_id if best_ratio >= 0.6 else None
 
 
+P1_BATCH_SIZE = 30  # на большом единичном промпте (сотни сообщений) модель теряет отдельные
+# сообщения - режем на пачки такого размера, где найденное на тесте не терялось
+
+
 def process_source(conn, source_chat_id: int) -> int:
     """Прогоняет П1 над необработанными сообщениями источника, создаёт кандидатов.
     Возвращает число найденных кандидатов."""
-    messages = catcher_db.unprocessed_messages_for_source(conn, source_chat_id)
-    candidates = run_p1_on_batch(list(messages))
+    messages = list(catcher_db.unprocessed_messages_for_source(conn, source_chat_id))
     created = 0
-    for c in candidates:
-        raw_message_id = _find_matching_message_id(c.get("quote", ""), messages)
-        if raw_message_id is None:
-            continue  # П1 не должен выдумывать цитаты вне входного текста - пропускаем несовпавшее
-        catcher_db.add_candidate(
-            conn,
-            raw_message_id=raw_message_id,
-            quote=c.get("quote", ""),
-            reason=c.get("reason", ""),
-            contact_url=c.get("contact_url"),
-            opener_text=c.get("opener_text", ""),
-        )
-        created += 1
+    for i in range(0, len(messages), P1_BATCH_SIZE):
+        chunk = messages[i:i + P1_BATCH_SIZE]
+        candidates = run_p1_on_batch(chunk)
+        for c in candidates:
+            raw_message_id = _find_matching_message_id(c.get("quote", ""), chunk)
+            if raw_message_id is None:
+                continue  # П1 не должен выдумывать цитаты вне входного текста - пропускаем несовпавшее
+            catcher_db.add_candidate(
+                conn,
+                raw_message_id=raw_message_id,
+                quote=c.get("quote", ""),
+                reason=c.get("reason", ""),
+                contact_url=c.get("contact_url"),
+                opener_text=c.get("opener_text", ""),
+            )
+            created += 1
     catcher_db.mark_messages_processed(conn, [m["id"] for m in messages])
     return created

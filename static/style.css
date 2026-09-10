@@ -384,6 +384,10 @@ input, select {
   flex-shrink: 0;
 }
 .list-row .row-actions form { margin: 0; }
+.list-row .row-actions button[disabled] { opacity: .6; cursor: not-allowed; }
+.list-row .row-actions button .btn-loading { display: none; }
+.list-row .row-actions button.htmx-request .btn-label { display: none; }
+.list-row .row-actions button.htmx-request .btn-loading { display: inline; }
 
 .add-source-form {
   display: flex;
