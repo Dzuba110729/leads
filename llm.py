@@ -24,14 +24,14 @@ def _get_client():
     return _client
 
 
-def call_json(system_prompt: str, user_message: str, max_tokens: int = 1024) -> dict | None:
+def call_json(system_prompt: str, user_message: str, max_tokens: int = 1024, model: str | None = None) -> dict | None:
     """Вызывает LLM, ожидает JSON-ответ. Возвращает None при отсутствии ключа или ошибке."""
     if not available():
         return None
     try:
         client = _get_client()
         resp = client.messages.create(
-            model=CONFIG.llm_model,
+            model=model or CONFIG.llm_model,
             max_tokens=max_tokens,
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
@@ -47,13 +47,13 @@ def call_json(system_prompt: str, user_message: str, max_tokens: int = 1024) -> 
         return None
 
 
-def call_text(system_prompt: str, user_message: str, max_tokens: int = 1024) -> str | None:
+def call_text(system_prompt: str, user_message: str, max_tokens: int = 1024, model: str | None = None) -> str | None:
     if not available():
         return None
     try:
         client = _get_client()
         resp = client.messages.create(
-            model=CONFIG.llm_model,
+            model=model or CONFIG.llm_model,
             max_tokens=max_tokens,
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],

@@ -396,6 +396,35 @@ input, select {
 }
 .add-source-form input { flex: 1; }
 
+.candidate-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.candidate-tabs .tab {
+  background: var(--bg);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  text-decoration: none;
+  cursor: pointer;
+}
+.candidate-tabs .tab::before { display: none; }
+.candidate-tabs .tab:hover { border-color: var(--accent); }
+.candidate-tabs .tab-active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 16px;
+}
+.pager a { cursor: pointer; font-weight: 600; }
+
 .candidate-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));

@@ -79,6 +79,7 @@ async def fetch_new_messages(conn, source) -> int:
                 posted_at=message.date.isoformat() if message.date else None,
                 author_username=username,
                 author_tg_id=getattr(sender, "id", None),
+                reply_to_external_id=str(message.reply_to_msg_id) if message.reply_to_msg_id else None,
             )
             if row_id is not None:
                 fetched += 1

@@ -33,6 +33,8 @@ class Config:
     # LLM
     llm_api_key: str = os.getenv("ANTHROPIC_API_KEY", os.getenv("LLM_API_KEY", ""))
     llm_model: str = os.getenv("LLM_MODEL", "claude-sonnet-5")
+    # Дешёвая модель для предфильтра сборщика: отсеивает явный мусор до дорогого разбора
+    llm_model_cheap: str = os.getenv("LLM_MODEL_CHEAP", "claude-haiku-4-5-20251001")
     llm_base_url: str = os.getenv("LLM_BASE_URL", "")
 
     # Хранение
@@ -123,6 +125,18 @@ class Config:
     # Не анализируем сообщения старше этого срока - иначе первая выгрузка старого чата
     # начинает читать историю с самого начала (могут оказаться сообщения многолетней давности)
     catcher_max_message_age_days: int = int(os.getenv("CATCHER_MAX_MESSAGE_AGE_DAYS", "180"))
+
+    # Полнота поиска лидов (см. диагностику 2026-09-17: один проход терял стабильно
+    # находимые лиды, поэтому проходов несколько, а пачки идут внахлёст).
+    p1_batch_size: int = int(os.getenv("P1_BATCH_SIZE", "30"))
+    # Нахлёст соседних пачек: диалог, разрезанный границей, целиком попадает хотя бы в одну
+    p1_batch_overlap: int = int(os.getenv("P1_BATCH_OVERLAP", "5"))
+    # Сколько раз прогонять каждую пачку: ответ модели не дословно повторяем,
+    # объединение находок за несколько проходов поднимает полноту
+    p1_passes: int = int(os.getenv("P1_PASSES", "2"))
+    # Предфильтр дешёвой моделью перед дорогим разбором
+    p1_prefilter_enabled: bool = _bool("P1_PREFILTER_ENABLED", "1")
+    p1_prefilter_batch_size: int = int(os.getenv("P1_PREFILTER_BATCH_SIZE", "60"))
 
 
 CONFIG = Config()

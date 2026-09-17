@@ -2,6 +2,9 @@
   <span class="platform-badge">{{ s['platform'] }}</span>
   <span class="url">{{ s['url'] }}</span>
   <span class="checked-at">{{ s['last_checked_at'] or 'ещё не проверялось' }}</span>
+  <span class="hint" style="margin-top:0">
+    {{ s['messages_total'] }} сообщ.{% if s['messages_pending'] %}, ждут разбора: {{ s['messages_pending'] }}{% endif %}
+  </span>
   <span class="pill" style="background: {{ 'var(--status-оплачено)' if s['enabled'] else 'var(--text-muted)' }}">
     {{ 'включён' if s['enabled'] else 'выключен' }}
   </span>
@@ -10,6 +13,13 @@
       <button type="submit" hx-disabled-elt="this" hx-indicator="this">
         <span class="btn-label">Выгрузить сейчас</span>
         <span class="btn-loading htmx-indicator">Идёт выгрузка…</span>
+      </button>
+    </form>
+    <form hx-post="/catcher/sources/{{ s['id'] }}/rescan" hx-target="#source-{{ s['id'] }}" hx-swap="outerHTML"
+          hx-confirm="Перепроверить старые сообщения этого чата заново? Новые из Telegram не тянем.">
+      <button type="submit" hx-disabled-elt="this" hx-indicator="this">
+        <span class="btn-label">Перепроверить старое</span>
+        <span class="btn-loading htmx-indicator">Идёт разбор…</span>
       </button>
     </form>
     <form hx-post="/catcher/sources/{{ s['id'] }}/toggle" hx-target="#source-{{ s['id'] }}" hx-swap="outerHTML">

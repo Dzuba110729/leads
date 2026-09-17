@@ -219,19 +219,61 @@ def _catcher_candidate_dict(c) -> dict:
     return d
 
 
+def _source_dict(conn, s) -> dict:
+    d = dict(s)
+    stats = catcher_db.source_stats(conn, s["id"])
+    d["messages_total"] = stats["total"] or 0
+    d["messages_pending"] = stats["pending"] or 0
+    return d
+
+
+# Вкладки списка кандидатов: по умолчанию показываем только тех, кому ещё не писали —
+# при повторном обходе через пару дней старые обработанные не должны мешаться под ногами.
+CANDIDATE_VIEWS = {
+    "new": {"status": "new", "confidence": None, "label": "Новые"},
+    "maybe": {"status": "new", "confidence": "maybe", "label": "Под вопросом"},
+    "contacted": {"status": "contacted", "confidence": None, "label": "Уже написал"},
+    "all": {"status": None, "confidence": None, "label": "Все"},
+}
+
+
+def _candidates_context(conn, view: str, page: int) -> dict:
+    spec = CANDIDATE_VIEWS.get(view, CANDIDATE_VIEWS["new"])
+    page = max(1, page)
+    page_size = catcher_db.CANDIDATES_PAGE_SIZE
+    rows = catcher_db.list_candidates(
+        conn,
+        status=spec["status"],
+        confidence=spec["confidence"],
+        limit=page_size + 1,
+        offset=(page - 1) * page_size,
+    )
+    has_next = len(rows) > page_size
+    return {
+        "candidates": [_catcher_candidate_dict(c) for c in rows[:page_size]],
+        "counts": catcher_db.count_candidates(conn),
+        "view": view if view in CANDIDATE_VIEWS else "new",
+        "views": CANDIDATE_VIEWS,
+        "page": page,
+        "has_next": has_next,
+    }
+
+
 @app.get("/catcher")
-async def catcher_index(request: Request):
+async def catcher_index(request: Request, view: str = "new", page: int = 1):
     with db.session() as conn:
         catcher_db.migrate(conn)
-        sources = catcher_db.list_sources(conn)
-        candidates = [_catcher_candidate_dict(c) for c in catcher_db.list_candidates(conn)]
+        sources = [_source_dict(conn, s) for s in catcher_db.list_sources(conn)]
+        candidates_ctx = _candidates_context(conn, view, page)
     context = {
         "request": request,
         "active": "catcher",
         "username": _current_username(request),
         "sources": sources,
-        "candidates": candidates,
+        **candidates_ctx,
     }
+    if _is_htmx(request):
+        return templates.TemplateResponse(request, "_catcher_candidates.html", context)
     return templates.TemplateResponse(request, "catcher.html", context)
 
 
@@ -242,7 +284,7 @@ async def catcher_add_source(request: Request, platform: str = Form(...), url: s
     with db.session() as conn:
         catcher_db.migrate(conn)
         catcher_db.add_source(conn, platform, url)
-        sources = catcher_db.list_sources(conn)
+        sources = [_source_dict(conn, s) for s in catcher_db.list_sources(conn)]
 
     if _is_htmx(request):
         return templates.TemplateResponse(request, "_catcher_sources.html", {"request": request, "sources": sources}
@@ -258,7 +300,7 @@ async def catcher_toggle_source(request: Request, source_id: int):
         if source is None:
             raise HTTPException(status_code=404, detail="source not found")
         catcher_db.set_source_enabled(conn, source_id, not source["enabled"])
-        source = catcher_db.get_source(conn, source_id)
+        source = _source_dict(conn, catcher_db.get_source(conn, source_id))
 
     if _is_htmx(request):
         return templates.TemplateResponse(request, "_catcher_source_row.html", {"request": request, "s": source}
@@ -293,7 +335,41 @@ async def catcher_fetch(request: Request, source_id: int):
     await asyncio.to_thread(_run_pipeline)
 
     with db.session() as conn:
+        source = _source_dict(conn, catcher_db.get_source(conn, source_id))
+
+    if _is_htmx(request):
+        return templates.TemplateResponse(request, "_catcher_source_row.html", {"request": request, "s": source}
+        )
+    return RedirectResponse(url="/catcher", status_code=303)
+
+
+# Сообщения, выгруженные до этой даты, разбирал код, который потом дважды чинили именно
+# из-за потери лидов (коммиты e73f9c3 и 9cce992). Их стоит перепроверить заново.
+RESCAN_BEFORE = "2026-09-10"
+
+
+@app.post("/catcher/sources/{source_id}/rescan")
+async def catcher_rescan(request: Request, source_id: int, full: int = 0):
+    """«Перепроверить»: снимает пометку «разобрано» со старых сообщений и гоняет П1 заново,
+    БЕЗ новой выгрузки чата. Новых сообщений из Telegram не тянет."""
+    with db.session() as conn:
+        catcher_db.migrate(conn)
         source = catcher_db.get_source(conn, source_id)
+        if source is None:
+            raise HTTPException(status_code=404, detail="source not found")
+
+    def _run_rescan() -> None:
+        with db.session() as thread_conn:
+            reset = catcher_db.reset_processed_for_source(
+                thread_conn, source_id, fetched_before=None if full else RESCAN_BEFORE
+            )
+            logger.info("перепроверка источника %s: снято %s пометок «разобрано»", source_id, reset)
+            catcher_pipeline.process_source(thread_conn, source_id)
+
+    await asyncio.to_thread(_run_rescan)
+
+    with db.session() as conn:
+        source = _source_dict(conn, catcher_db.get_source(conn, source_id))
 
     if _is_htmx(request):
         return templates.TemplateResponse(request, "_catcher_source_row.html", {"request": request, "s": source}
@@ -306,7 +382,7 @@ async def catcher_mark_contacted(request: Request, candidate_id: int):
     with db.session() as conn:
         catcher_db.migrate(conn)
         catcher_db.mark_contacted(conn, candidate_id)
-        candidate = next((c for c in catcher_db.list_candidates(conn) if c["id"] == candidate_id), None)
+        candidate = catcher_db.get_candidate(conn, candidate_id)
         candidate = _catcher_candidate_dict(candidate) if candidate else None
 
     if _is_htmx(request):

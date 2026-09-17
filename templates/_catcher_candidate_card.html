@@ -1,4 +1,7 @@
 <div class="card candidate-card" id="candidate-{{ c['id'] }}">
+  {% if c['confidence'] == 'maybe' %}
+  <span class="pill" style="background: var(--text-muted)">под вопросом</span>
+  {% endif %}
   <blockquote>{{ c['quote'] }}</blockquote>
   <div class="reason">{{ c['reason'] }}</div>
   <div class="opener">{{ c['opener_text'] }}</div>

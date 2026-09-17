@@ -1,9 +1,44 @@
-{% if candidates %}
-<div class="candidate-grid" id="candidates-grid">
-  {% for c in candidates %}
-  {% include "_catcher_candidate_card.html" %}
-  {% endfor %}
+<div id="candidates-grid-wrap">
+  <div class="row candidate-tabs">
+    {% for key, v in views.items() %}
+    <a class="pill tab{{ ' tab-active' if view == key else '' }}"
+       hx-get="/catcher?view={{ key }}"
+       hx-target="#candidates-grid-wrap"
+       hx-swap="outerHTML"
+       hx-push-url="true"
+       href="/catcher?view={{ key }}">
+      {{ v['label'] }}{% if key == 'new' %} ({{ counts['new'] }}){% elif key == 'maybe' %} ({{ counts['new_maybe'] }}){% elif key == 'all' %} ({{ counts['total'] }}){% endif %}
+    </a>
+    {% endfor %}
+  </div>
+
+  {% if candidates %}
+  <div class="candidate-grid">
+    {% for c in candidates %}
+    {% include "_catcher_candidate_card.html" %}
+    {% endfor %}
+  </div>
+
+  {% if page > 1 or has_next %}
+  <div class="row pager">
+    {% if page > 1 %}
+    <a hx-get="/catcher?view={{ view }}&page={{ page - 1 }}" hx-target="#candidates-grid-wrap" hx-swap="outerHTML"
+       hx-push-url="true" href="/catcher?view={{ view }}&page={{ page - 1 }}">← Назад</a>
+    {% endif %}
+    <span class="hint" style="margin-top:0">страница {{ page }}</span>
+    {% if has_next %}
+    <a hx-get="/catcher?view={{ view }}&page={{ page + 1 }}" hx-target="#candidates-grid-wrap" hx-swap="outerHTML"
+       hx-push-url="true" href="/catcher?view={{ view }}&page={{ page + 1 }}">Дальше →</a>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% else %}
+  <div class="empty-state">
+    {% if view == 'new' %}Новых кандидатов нет — нажмите «Выгрузить сейчас» у источника.
+    {% elif view == 'maybe' %}Спорных кандидатов нет.
+    {% elif view == 'contacted' %}Вы ещё никому не писали.
+    {% else %}Кандидатов пока нет.{% endif %}
+  </div>
+  {% endif %}
 </div>
-{% else %}
-<div class="empty-state" id="candidates-grid">Пока нет кандидатов — нажмите «Выгрузить сейчас» у источника.</div>
-{% endif %}
