@@ -9,15 +9,17 @@
     {{ 'включён' if s['enabled'] else 'выключен' }}
   </span>
   <div class="row-actions">
-    <form hx-post="/catcher/sources/{{ s['id'] }}/fetch" hx-target="#source-{{ s['id'] }}" hx-swap="outerHTML">
-      <button type="submit" hx-disabled-elt="this" hx-indicator="this">
+    <form hx-post="/catcher/sources/{{ s['id'] }}/fetch" hx-target="#source-{{ s['id'] }}" hx-swap="outerHTML"
+          hx-disabled-elt="find button" hx-indicator="find button">
+      <button type="submit">
         <span class="btn-label">Выгрузить сейчас</span>
         <span class="btn-loading htmx-indicator">Идёт выгрузка…</span>
       </button>
     </form>
     <form hx-post="/catcher/sources/{{ s['id'] }}/rescan" hx-target="#source-{{ s['id'] }}" hx-swap="outerHTML"
-          hx-confirm="Перепроверить старые сообщения этого чата заново? Новые из Telegram не тянем.">
-      <button type="submit" hx-disabled-elt="this" hx-indicator="this">
+          hx-confirm="Перепроверить старые сообщения этого чата заново? Новые из Telegram не тянем."
+          hx-disabled-elt="find button" hx-indicator="find button">
+      <button type="submit">
         <span class="btn-label">Перепроверить старое</span>
         <span class="btn-loading htmx-indicator">Идёт разбор…</span>
       </button>

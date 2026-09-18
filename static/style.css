@@ -386,6 +386,18 @@ input, select {
 .list-row .row-actions form { margin: 0; }
 .list-row .row-actions button[disabled] { opacity: .6; cursor: not-allowed; }
 .list-row .row-actions button .btn-loading { display: none; }
+.list-row .row-actions button.htmx-request {
+  background: var(--status-документы);
+  color: #fff;
+  opacity: 1;
+  cursor: wait;
+  pointer-events: none;
+  animation: btn-pulse 1.2s ease-in-out infinite;
+}
+@keyframes btn-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .55; }
+}
 .list-row .row-actions button.htmx-request .btn-label { display: none; }
 .list-row .row-actions button.htmx-request .btn-loading { display: inline; }
 
