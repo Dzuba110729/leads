@@ -43,10 +43,15 @@ async def start_with_order(message: Message, command: CommandObject, bot: Bot) -
     if not payload.startswith("order_"):
         await message.answer("Добро пожаловать! Ссылка не распознана — напишите нам в личку.")
         return
-    order_id = int(payload.removeprefix("order_"))
+    try:
+        order_id = int(payload.removeprefix("order_"))
+    except ValueError:
+        await message.answer("Ссылка не распознана — напишите нам в личку.")
+        return
     with db.session() as conn:
-        order = db.get_order(conn, order_id)
+        order = db.get_order_owned_by(conn, order_id, message.from_user.id)
         if order is None:
+            logger.warning("deep-link denied: order=%s tg_id=%s", order_id, message.from_user.id)
             await message.answer("Заявка не найдена. Попробуйте получить ссылку заново.")
             return
         await message.answer(_order_card_text(order), reply_markup=_order_keyboard(order_id))
@@ -61,8 +66,9 @@ async def start_plain(message: Message) -> None:
 async def handle_handoff(callback: CallbackQuery, bot: Bot) -> None:
     order_id = int(callback.data.removeprefix("handoff:"))
     with db.session() as conn:
-        order = db.get_order(conn, order_id)
+        order = db.get_order_owned_by(conn, order_id, callback.from_user.id)
         if order is None:
+            logger.warning("handoff denied: order=%s tg_id=%s", order_id, callback.from_user.id)
             await callback.answer("Заявка не найдена", show_alert=True)
             return
         db.mark_handed_off(conn, order_id)

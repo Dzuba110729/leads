@@ -1,0 +1,17 @@
+{% if leads %}
+<div class="list">
+  {% for l in leads %}
+  <div class="list-row" id="blocked-{{ l['id'] }}">
+    <a class="url" href="{{ l['contact_link'] }}" target="_blank" rel="noopener">
+      {% if l['username'] %}@{{ l['username'] }}{% else %}id {{ l['tg_id'] }}{% endif %} ↗
+    </a>
+    <span class="checked-at" style="flex: 1">{{ l['block_reason'] or 'причина не указана' }}</span>
+    <form hx-post="/blocked/{{ l['id'] }}/unblock" hx-target="#blocked-list" hx-swap="innerHTML">
+      <button type="submit">Разблокировать</button>
+    </form>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty-state">Заблокированных лидов нет.</div>
+{% endif %}

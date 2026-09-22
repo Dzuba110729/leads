@@ -41,7 +41,25 @@ def _elapsed_minutes(created_at: str) -> float:
     return (datetime.now(timezone.utc) - created).total_seconds() / 60
 
 
-async def run_once(bot: "bot_module.Bot | None") -> None:
+async def _send_reminder(bot, userbot, tg_id: int, text: str) -> None:
+    if CONFIG.dry_run:
+        logger.info("[DRY_RUN] remind %s: %s", tg_id, text)
+        return
+    if bot is not None:
+        try:
+            await bot.send_message(tg_id, text)
+            return
+        except Exception as exc:
+            # Лид, который ни разу не нажал Start у бота-кассира, — штатный случай, а не сбой.
+            if userbot is None:
+                raise
+            logger.info("cashier bot cannot reach %s (%s), falling back to userbot", tg_id, exc)
+    if userbot is None:
+        raise RuntimeError("no channel to send reminder")
+    await userbot.send_message(tg_id, text)
+
+
+async def run_once(bot: "bot_module.Bot | None", userbot=None) -> None:
     with db.session() as conn:
         orders = db.list_orders_for_reminders(conn)
         for order in orders:
@@ -49,26 +67,29 @@ async def run_once(bot: "bot_module.Bot | None") -> None:
             action, new_stage = compute_next_action(elapsed, order["reminder_stage"])
             if action is None:
                 continue
-            lead = conn.execute("SELECT * FROM leads WHERE id = ?", (order["lead_id"],)).fetchone()
             if action == "autoclose":
                 db.close_order(conn, order["id"])
+                conn.commit()
                 logger.info("order %s autoclosed after silence", order["id"])
                 continue
-            db.bump_order_reminder(conn, order["id"], new_stage)
+            lead = conn.execute("SELECT * FROM leads WHERE id = ?", (order["lead_id"],)).fetchone()
             text = REMINDER_TEXTS.get(new_stage, REMINDER_TEXTS[3])
-            if bot is not None:
-                await bot_module.notify_status_change(bot, lead["tg_id"], text)
-            else:
-                logger.info("[userbot fallback] remind lead %s: %s", lead["tg_id"], text)
+            try:
+                await _send_reminder(bot, userbot, lead["tg_id"], text)
+            except Exception:
+                logger.exception("reminder for order %s (lead %s) failed, skipping", order["id"], lead["tg_id"])
+                continue
+            db.bump_order_reminder(conn, order["id"], new_stage)
+            conn.commit()
 
 
-async def run_forever(bot: "bot_module.Bot | None", interval_seconds: int = 300) -> None:
+async def run_forever(bot: "bot_module.Bot | None", userbot=None, interval_seconds: int = 300) -> None:
     if not CONFIG.scheduler_enabled:
         logger.info("scheduler disabled (SCHEDULER_ENABLED=0), reminders loop not started")
         return
     while True:
         try:
-            await run_once(bot)
+            await run_once(bot, userbot)
         except Exception:
             logger.exception("reminders.run_once failed")
         await asyncio.sleep(interval_seconds)

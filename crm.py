@@ -25,6 +25,7 @@ import auth
 import bot as bot_module
 import catcher_db
 import catcher_pipeline
+import catcher_service
 import db
 from config import CONFIG
 
@@ -204,9 +205,44 @@ async def advance(request: Request, order_id: int):
 
 @app.post("/api/reset")
 async def reset(request: Request) -> dict:
+    # Стирает всех лидов и заявки — только для тестового режима, в бою недоступно.
+    if not CONFIG.dry_run:
+        raise HTTPException(status_code=403, detail="reset is available only with DRY_RUN=1")
     with db.session() as conn:
         db.reset(conn)
     return {"ok": True}
+
+
+# --- заблокированные лиды (ложные срабатывания защиты от инъекций) -------------------------
+
+def _blocked_dict(lead) -> dict:
+    d = dict(lead)
+    d["contact_link"] = f"https://t.me/{d['username']}" if d["username"] else f"tg://user?id={d['tg_id']}"
+    return d
+
+
+@app.get("/blocked")
+async def blocked_page(request: Request):
+    with db.session() as conn:
+        leads = [_blocked_dict(l) for l in db.list_blocked_leads(conn)]
+    context = {
+        "request": request,
+        "active": "blocked",
+        "username": _current_username(request),
+        "leads": leads,
+    }
+    return templates.TemplateResponse(request, "blocked.html", context)
+
+
+@app.post("/blocked/{lead_id}/unblock")
+async def unblock(request: Request, lead_id: int):
+    with db.session() as conn:
+        db.unblock_lead(conn, lead_id)
+        logger.info("lead %s unblocked by %s", lead_id, _current_username(request))
+        leads = [_blocked_dict(l) for l in db.list_blocked_leads(conn)]
+    if _is_htmx(request):
+        return templates.TemplateResponse(request, "_blocked_list.html", {"request": request, "leads": leads})
+    return RedirectResponse(url="/blocked", status_code=303)
 
 
 # --- /catcher: автовыгрузка чатов для шага 1 «Ловец лидов» -------------------------------------
@@ -310,29 +346,10 @@ async def catcher_toggle_source(request: Request, source_id: int):
 
 @app.post("/catcher/sources/{source_id}/fetch")
 async def catcher_fetch(request: Request, source_id: int):
-    """«Выгрузить сейчас»: сама выгрузка идёт на event loop (Telethon и так асинхронный),
-    а прогон через LLM — в отдельном потоке со своим sqlite-соединением, чтобы синхронные
-    вызовы Anthropic (их может быть много на большой пачке) не морозили весь сервер CRM."""
-    with db.session() as conn:
-        catcher_db.migrate(conn)
-        source = catcher_db.get_source(conn, source_id)
-        if source is None:
-            raise HTTPException(status_code=404, detail="source not found")
-
-        if source["platform"] == "tg":
-            import catcher_tg
-
-            await catcher_tg.fetch_new_messages(conn, source)
-        else:
-            import catcher_vk
-
-            await asyncio.to_thread(catcher_vk.fetch_new_messages, conn, source)
-
-    def _run_pipeline() -> None:
-        with db.session() as thread_conn:
-            catcher_pipeline.process_source(thread_conn, source_id)
-
-    await asyncio.to_thread(_run_pipeline)
+    try:
+        await catcher_service.run_source(source_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="source not found")
 
     with db.session() as conn:
         source = _source_dict(conn, catcher_db.get_source(conn, source_id))

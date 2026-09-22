@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 import uvicorn
 from telethon import TelegramClient, events
@@ -50,8 +51,10 @@ async def handle_incoming(event, source: str) -> None:
             return
         dialog_context = db.append_dialog_context(conn, lead["id"], "лид", text)
 
-    # Шаг 8: защита от инъекций - до любого другого LLM-вызова
-    guard_result = guard.check(text)
+    # Шаг 8: защита от инъекций - до любого другого LLM-вызова.
+    # LLM-клиент синхронный, поэтому все его вызовы уходят в поток - иначе на 2-5 с
+    # замирает весь процесс (другие лиды, CRM, фоновые циклы).
+    guard_result = await asyncio.to_thread(guard.check, text)
     if guard_result.is_injection:
         with db.session() as conn:
             db.block_lead(conn, lead["id"], guard_result.reasoning)
@@ -74,7 +77,7 @@ async def handle_incoming(event, source: str) -> None:
         return
 
     # Шаг 2.3: скоринг П1 - с учётом контекста диалога, не только последней реплики
-    score_result = pipeline.score_message(dialog_context)
+    score_result = await asyncio.to_thread(pipeline.score_message, dialog_context)
     logger.info(
         "SCORE lead=%s score=%s band=%s source=%s reasoning=%s",
         tg_id, score_result.score, score_result.band, score_result.source, score_result.reasoning,
@@ -91,14 +94,14 @@ async def handle_incoming(event, source: str) -> None:
     # на входящее сообщение лида (шаг 2 методики - отвечаем на каждое сообщение по баллу), а не
     # проактивный прогрев затихших (шаг 3, daily_warmup_task) - там зазор по-прежнему действует.
     funnel_stage = "интерес"  # PLACEHOLDER: воронка не детализирована пользователем (см. og1/PLAN.md п.6)
-    touch = pipeline.generate_touch(score_result.band, funnel_stage, dialog_context)
+    touch = await asyncio.to_thread(pipeline.generate_touch, score_result.band, funnel_stage, dialog_context)
     await _reply(event, touch, lead_id=lead["id"])
     with db.session() as conn:
         db.record_touch(conn, lead["id"], next_step_idx=0)
 
 
 async def _escalate(event, lead, dialog_text: str, score_result: pipeline.ScoreResult) -> None:
-    extracted = pipeline.extract_order(dialog_text)
+    extracted = await asyncio.to_thread(pipeline.extract_order, dialog_text)
     with db.session() as conn:
         order = db.create_order(
             conn,
@@ -126,28 +129,60 @@ async def _reply(event, text: str, lead_id: int | None = None) -> None:
     await event.reply(text)
 
 
-async def daily_warmup_task() -> None:
+def warmup_silence_days(last_touch_at: str | None) -> int | None:
+    if not last_touch_at:
+        return None
+    last_touch = datetime.fromisoformat(last_touch_at)
+    return (datetime.now(timezone.utc) - last_touch).days
+
+
+async def warmup_once(userbot) -> int:
+    """Шаг 3: один проход по затихшим лидам. Возвращает число отправленных касаний."""
+    sent = 0
+    with db.session() as conn:
+        for lead in db.active_leads_for_warmup(conn):
+            silence_days = warmup_silence_days(lead["last_touch_at"])
+            if silence_days is None:
+                continue
+            text = pipeline.warmup_step_text(silence_days)
+            if text is None:
+                continue
+            if CONFIG.dry_run or userbot is None:
+                logger.info("[DRY_RUN warmup] lead=%s silence=%sd text=%s", lead["tg_id"], silence_days, text)
+            else:
+                try:
+                    await userbot.send_message(lead["tg_id"], text)
+                except Exception:
+                    logger.exception("warmup send failed lead=%s, skipping", lead["tg_id"])
+                    continue
+                logger.info("WARMUP lead=%s silence=%sd step=%s", lead["tg_id"], silence_days, lead["next_step_idx"] + 1)
+            db.append_dialog_context(conn, lead["id"], "бот", text)
+            db.record_touch(conn, lead["id"], next_step_idx=lead["next_step_idx"] + 1)
+            conn.commit()
+            sent += 1
+    return sent
+
+
+async def daily_warmup_task(userbot) -> None:
     if not CONFIG.scheduler_enabled:
         logger.info("scheduler disabled (SCHEDULER_ENABLED=0), warmup loop not started")
         return
     while True:
         try:
-            with db.session() as conn:
-                leads = db.active_leads_for_warmup(conn)
-                for lead in leads:
-                    from datetime import datetime, timezone
-                    if not lead["last_touch_at"]:
-                        continue
-                    last_touch = datetime.fromisoformat(lead["last_touch_at"])
-                    silence_days = (datetime.now(timezone.utc) - last_touch).days
-                    text = pipeline.warmup_step_text(silence_days)
-                    if text is None:
-                        continue
-                    logger.info("[DRY_RUN warmup] lead=%s silence=%sd text=%s", lead["tg_id"], silence_days, text)
-                    db.record_touch(conn, lead["id"], next_step_idx=lead["next_step_idx"] + 1)
+            await warmup_once(userbot)
         except Exception:
             logger.exception("daily_warmup_task iteration failed")
         await asyncio.sleep(24 * 3600)
+
+
+def build_userbot() -> TelegramClient | None:
+    if not (CONFIG.tg_api_id and CONFIG.tg_api_hash):
+        return None
+    if CONFIG.tg_string_session:
+        from telethon.sessions import StringSession
+
+        return TelegramClient(StringSession(CONFIG.tg_string_session), CONFIG.tg_api_id, CONFIG.tg_api_hash)
+    return TelegramClient("og1_userbot", CONFIG.tg_api_id, CONFIG.tg_api_hash)
 
 
 async def main() -> None:
@@ -155,15 +190,11 @@ async def main() -> None:
         pass  # прогреть/создать схему на старте
 
     cashier_bot = bot_module.build_bot() if CONFIG.bot_token else None
+    userbot = build_userbot()
 
-    tasks = [daily_warmup_task(), reminders.run_forever(cashier_bot)]
+    tasks = [daily_warmup_task(userbot), reminders.run_forever(cashier_bot, userbot)]
 
-    if CONFIG.tg_api_id and CONFIG.tg_api_hash:
-        if CONFIG.tg_string_session:
-            from telethon.sessions import StringSession
-            userbot = TelegramClient(StringSession(CONFIG.tg_string_session), CONFIG.tg_api_id, CONFIG.tg_api_hash)
-        else:
-            userbot = TelegramClient("og1_userbot", CONFIG.tg_api_id, CONFIG.tg_api_hash)
+    if userbot is not None:
 
         @userbot.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
         async def _on_dm(event):
@@ -183,6 +214,15 @@ async def main() -> None:
         tasks.append(router_dp.start_polling(cashier_bot))
     else:
         logger.warning("BOT_TOKEN не задан — бот-хэндофф не запущен")
+
+    if CONFIG.agent_bot_token:
+        import agent_bot
+
+        if not CONFIG.agent_allowed_ids:
+            logger.warning("AGENT_ALLOWED_IDS пуст — агент будет отвечать всем только подсказкой с их ID")
+        tasks.append(agent_bot.agent_dp.start_polling(agent_bot.build_agent_bot()))
+    else:
+        logger.info("AGENT_BOT_TOKEN не задан — ТГ-агент не запущен")
 
     config = uvicorn.Config(crm_app, host=CONFIG.crm_host, port=CONFIG.crm_port, log_level="info")
     server = uvicorn.Server(config)

@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}og1 CRM — Заблокированные{% endblock %}
+{% block content %}
+<div class="topbar">
+  <div>
+    <h1>Заблокированные лиды</h1>
+    <div class="subtitle">Защита от инъекций остановила диалог. Если это ошибка — разблокируйте, и бот снова будет отвечать</div>
+  </div>
+</div>
+<div class="card">
+  <div id="blocked-list">
+    {% include "_blocked_list.html" %}
+  </div>
+</div>
+{% endblock %}

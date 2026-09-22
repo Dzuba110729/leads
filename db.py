@@ -171,6 +171,14 @@ def block_lead(conn: sqlite3.Connection, lead_id: int, reason: str) -> None:
     conn.execute("UPDATE leads SET blocked = 1, block_reason = ? WHERE id = ?", (reason, lead_id))
 
 
+def unblock_lead(conn: sqlite3.Connection, lead_id: int) -> None:
+    conn.execute("UPDATE leads SET blocked = 0, block_reason = NULL WHERE id = ?", (lead_id,))
+
+
+def list_blocked_leads(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM leads WHERE blocked = 1 ORDER BY last_seen_at DESC").fetchall()
+
+
 def set_funnel_stage(conn: sqlite3.Connection, lead_id: int, stage: int) -> None:
     conn.execute("UPDATE leads SET funnel_stage = ? WHERE id = ?", (stage, lead_id))
 
@@ -221,6 +229,14 @@ def create_order(
 
 def get_order(conn: sqlite3.Connection, order_id: int) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+
+
+def get_order_owned_by(conn: sqlite3.Connection, order_id: int, tg_id: int) -> sqlite3.Row | None:
+    """Заявка только для её владельца: чужой tg_id получает None, как будто заявки нет."""
+    return conn.execute(
+        "SELECT orders.* FROM orders JOIN leads ON leads.id = orders.lead_id WHERE orders.id = ? AND leads.tg_id = ?",
+        (order_id, tg_id),
+    ).fetchone()
 
 
 def latest_order_for_lead(conn: sqlite3.Connection, lead_id: int) -> sqlite3.Row | None:

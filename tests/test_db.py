@@ -48,3 +48,28 @@ def test_reset_clears_tables():
     db.get_or_create_lead(conn, tg_id=333, username="parent3")
     db.reset(conn)
     assert conn.execute("SELECT COUNT(*) c FROM leads").fetchone()["c"] == 0
+
+
+def test_order_visible_only_to_owner():
+    conn = _mem_conn()
+    db.migrate(conn)
+    owner = db.get_or_create_lead(conn, tg_id=444, username="owner")
+    order = db.create_order(conn, owner["id"], "Школьный", 28310, "приёмная_комиссия", False, "тест")
+    assert db.get_order_owned_by(conn, order["id"], 444)["id"] == order["id"]
+    assert db.get_order_owned_by(conn, order["id"], 555) is None
+    assert db.get_order_owned_by(conn, 999, 444) is None
+
+
+def test_block_and_unblock_lead():
+    conn = _mem_conn()
+    db.migrate(conn)
+    lead = db.get_or_create_lead(conn, tg_id=666, username="parent6")
+    db.block_lead(conn, lead["id"], "тестовая причина")
+    blocked = db.list_blocked_leads(conn)
+    assert [l["id"] for l in blocked] == [lead["id"]]
+    assert blocked[0]["block_reason"] == "тестовая причина"
+    db.unblock_lead(conn, lead["id"])
+    assert db.list_blocked_leads(conn) == []
+    refreshed = db.get_or_create_lead(conn, tg_id=666, username="parent6")
+    assert refreshed["blocked"] == 0
+    assert refreshed["block_reason"] is None
