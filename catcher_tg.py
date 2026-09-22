@@ -27,6 +27,17 @@ def _build_client() -> TelegramClient:
     return TelegramClient("catcher_tg", CONFIG.catcher_tg_api_id, CONFIG.catcher_tg_api_hash)
 
 
+def message_link(entity, message_id: int, fallback_url: str) -> str:
+    """Публичный чат → t.me/<username>/<id>; закрытый супергруппа/канал → t.me/c/<id>/<id>;
+    обычная маленькая группа ссылок на сообщения не имеет — остаётся адрес чата."""
+    username = getattr(entity, "username", None)
+    if username:
+        return f"https://t.me/{username}/{message_id}"
+    if getattr(entity, "megagroup", False) or getattr(entity, "broadcast", False):
+        return f"https://t.me/c/{entity.id}/{message_id}"
+    return fallback_url
+
+
 async def fetch_new_messages(conn, source) -> int:
     """Тянет только новые сообщения (offset_id=last_message_id), останавливаясь на уже виденном.
     При FloodWaitError - просто ждёт и продолжает (MVP-решение, без ретраев/ротации сверх этого)."""
@@ -75,7 +86,7 @@ async def fetch_new_messages(conn, source) -> int:
                 external_id=str(message.id),
                 author=author,
                 text=message.text,
-                url=f"{source['url'].rstrip('/')}/{message.id}",
+                url=message_link(entity, message.id, source["url"]),
                 posted_at=message.date.isoformat() if message.date else None,
                 author_username=username,
                 author_tg_id=getattr(sender, "id", None),

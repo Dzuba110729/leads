@@ -138,5 +138,22 @@ class Config:
     p1_prefilter_enabled: bool = _bool("P1_PREFILTER_ENABLED", "1")
     p1_prefilter_batch_size: int = int(os.getenv("P1_PREFILTER_BATCH_SIZE", "60"))
 
+    # ТГ-агент оператора: отдельный бот, слушает только перечисленные Telegram-ID
+    agent_bot_token: str = os.getenv("AGENT_BOT_TOKEN", "")
+    agent_allowed_ids: list[int] = field(
+        default_factory=lambda: [int(x) for x in _list("AGENT_ALLOWED_IDS", "") if x.isdigit()]
+    )
+    agent_model: str = os.getenv("AGENT_MODEL", "claude-sonnet-5")
+
+    # Google Docs для отчётов агента. Основной путь — вход от имени владельца (OAuth-клиент
+    # типа Desktop + токен из google_login.py): документы лежат на его Диске. Сервисный
+    # аккаунт — запасной вариант только для Google Workspace (у обычного Gmail у робота
+    # нулевая квота Диска, создание файла падает с storageQuotaExceeded).
+    google_oauth_client_file: str = os.getenv("GOOGLE_OAUTH_CLIENT_FILE", "")
+    google_oauth_token_file: str = os.getenv("GOOGLE_OAUTH_TOKEN_FILE", "secrets/google-token.json")
+    google_service_account_file: str = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "")
+    google_share_emails: list[str] = field(default_factory=lambda: _list("GOOGLE_SHARE_EMAILS", ""))
+    google_drive_folder_id: str = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
+
 
 CONFIG = Config()

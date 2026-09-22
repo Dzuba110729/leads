@@ -268,6 +268,47 @@ def list_candidates(
     ).fetchall()
 
 
+def list_candidates_for_export(
+    conn: sqlite3.Connection,
+    status: str | None = "new",
+    source_ids: list[int] | None = None,
+    since: str | None = None,
+    limit: int = 500,
+) -> list[sqlite3.Row]:
+    """Кандидаты с чатом-источником и датой сообщения — для отчёта агента."""
+    where, params = [], []
+    if status:
+        where.append("catch_candidates.status = ?")
+        params.append(status)
+    if source_ids:
+        where.append(f"raw_messages.source_chat_id IN ({','.join('?' * len(source_ids))})")
+        params.extend(source_ids)
+    if since:
+        where.append("catch_candidates.created_at >= ?")
+        params.append(since)
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    return conn.execute(
+        f"""
+        SELECT catch_candidates.*,
+               raw_messages.url AS message_url,
+               raw_messages.text AS message_text,
+               raw_messages.posted_at AS posted_at,
+               raw_messages.author AS author_name,
+               raw_messages.author_username AS author_username,
+               raw_messages.author_tg_id AS author_tg_id,
+               source_chats.url AS source_url,
+               source_chats.platform AS source_platform
+        FROM catch_candidates
+        JOIN raw_messages ON raw_messages.id = catch_candidates.raw_message_id
+        JOIN source_chats ON source_chats.id = raw_messages.source_chat_id
+        {clause}
+        ORDER BY source_chats.url, catch_candidates.confidence = 'maybe', catch_candidates.created_at DESC
+        LIMIT ?
+        """,
+        [*params, limit],
+    ).fetchall()
+
+
 def count_candidates(conn: sqlite3.Connection) -> dict[str, int]:
     row = conn.execute(
         """

@@ -165,3 +165,16 @@ def test_reply_context_lands_in_prompt():
     rendered = catcher_pipeline._format_batch(messages, {"100": parent})
     assert "в ответ на" in rendered
     assert "травят в школе" in rendered
+
+
+def test_message_link_formats():
+    from types import SimpleNamespace
+
+    import catcher_tg
+
+    public = SimpleNamespace(username="parents_chat", id=1, megagroup=True)
+    assert catcher_tg.message_link(public, 5, "x") == "https://t.me/parents_chat/5"
+    private = SimpleNamespace(username=None, id=2223334445, megagroup=True, broadcast=False)
+    assert catcher_tg.message_link(private, 93751, "x") == "https://t.me/c/2223334445/93751"
+    small = SimpleNamespace(username=None, id=77)
+    assert catcher_tg.message_link(small, 1, "https://t.me/+abc") == "https://t.me/+abc"

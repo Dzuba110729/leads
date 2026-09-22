@@ -145,6 +145,9 @@ priority.py   — Priority Score + обратное планирование (ш
 production_db.py — таблица production_tasks, миграции, CRUD, пересчёт приоритетов
 poller.py     — обработка новых заявок производства (расчёт КП → задача)
 login.py, export_session.py — разовый логин и экспорт StringSession для деплоя
+catcher_service.py — общий «выгрузить чат → разобрать П1» для CRM и агента
+agent_bot.py    — ТГ-агент оператора: вопросы по проекту, обход чатов, отчёт в Google Docs (tool use)
+gdocs.py        — сборка документа с лидами через сервисный аккаунт Google
 tests/        — юнит-тесты чистой логики (без Telegram/LLM)
 ```
 
