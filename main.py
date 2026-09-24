@@ -52,6 +52,8 @@ async def handle_incoming(event, source: str) -> None:
         if lead["blocked"]:
             return
         dialog_context = db.append_dialog_context(conn, lead["id"], "лид", text)
+        if lead["manual_mode"]:
+            return  # «Веду сам»: реплику сохранили для контекста, отвечает менеджер
 
     # Шаг 8: защита от инъекций - до любого другого LLM-вызова.
     # LLM-клиент синхронный, поэтому все его вызовы уходят в поток - иначе на 2-5 с
@@ -124,6 +126,29 @@ async def handle_incoming(event, source: str) -> None:
         db.record_touch(conn, lead["id"], next_step_idx=0)
 
 
+# Автоответ продавца тоже приходит в обработчик исходящих, а его id запоминается только после
+# отправки — ждём немного, прежде чем решать, кто написал: бот или менеджер.
+AUTO_SENT_SETTLE_SECONDS = 2
+
+
+async def handle_outgoing(event) -> None:
+    """Сообщение, которое менеджер сам написал лиду с продающего аккаунта (с телефона или компьютера).
+    Пишем его в историю диалога, чтобы ИИ знал, с чем менеджер зашёл, и продолжал разговор с этого места."""
+    text = (event.raw_text or "").strip()
+    if not text or str(event.chat_id) == str(CONFIG.operator_chat):
+        return
+    await asyncio.sleep(AUTO_SENT_SETTLE_SECONDS)
+    if runtime.is_auto_sent(event.chat_id, event.id):
+        return
+    chat = await event.get_chat()
+    if getattr(chat, "bot", False) or getattr(chat, "is_self", False):
+        return
+    with db.session() as conn:
+        lead = db.ensure_lead(conn, chat.id, getattr(chat, "username", None))
+        db.append_dialog_context(conn, lead["id"], "менеджер", text)
+    logger.info("MANAGER lead=%s: сообщение менеджера записано в диалог", chat.id)
+
+
 async def _escalate(event, lead, dialog_text: str, score_result: pipeline.ScoreResult, who: str = "") -> None:
     extracted, failed = await asyncio.to_thread(alerts.run_llm_step, pipeline.extract_order, dialog_text)
     if failed:  # без ИИ заявка собралась бы из догадок — ждём, пока ИИ заработает
@@ -153,7 +178,7 @@ async def _reply(event, text: str, lead_id: int | None = None) -> None:
     if CONFIG.dry_run:
         logger.info("[DRY_RUN] would reply: %s", text)
         return
-    await event.reply(text)
+    runtime.remember_auto_sent(event.chat_id, await event.reply(text))
 
 
 def warmup_silence_days(last_touch_at: str | None) -> int | None:
@@ -178,7 +203,7 @@ async def warmup_once(userbot) -> int:
                 logger.info("[DRY_RUN warmup] lead=%s silence=%sd text=%s", lead["tg_id"], silence_days, text)
             else:
                 try:
-                    await userbot.send_message(lead["tg_id"], text)
+                    runtime.remember_auto_sent(lead["tg_id"], await userbot.send_message(lead["tg_id"], text))
                 except Exception:
                     logger.exception("warmup send failed lead=%s, skipping", lead["tg_id"])
                     continue
@@ -238,6 +263,10 @@ async def main() -> None:
         @userbot.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
         async def _on_dm(event):
             await handle_incoming(event, source="dm")
+
+        @userbot.on(events.NewMessage(outgoing=True, func=lambda e: e.is_private))
+        async def _on_outgoing_dm(event):
+            await handle_outgoing(event)
 
         @userbot.on(events.NewMessage(incoming=True, func=lambda e: e.is_group))
         async def _on_group(event):

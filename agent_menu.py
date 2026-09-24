@@ -98,6 +98,19 @@ def _fmt_dt(value: str | None) -> str:
         return value
 
 
+def _fmt_posted(value: str | None) -> str:
+    """Когда автор написал сообщение в чате: TG хранит ISO-дату, VK — unix-время строкой."""
+    if not value:
+        return "дата неизвестна"
+    try:
+        posted = datetime.fromtimestamp(int(value), timezone.utc) if value.isdigit() else datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    days = (datetime.now(timezone.utc) - posted).days
+    ago = "сегодня" if days == 0 else "вчера" if days == 1 else f"{days} дн. назад"
+    return f"{posted.astimezone().strftime('%d.%m.%Y %H:%M')} ({ago})"
+
+
 def _today_start_utc() -> str:
     local_midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
     return local_midnight.astimezone(timezone.utc).isoformat()
@@ -243,6 +256,8 @@ def render_lead_card(lead_id: int, note: str = "") -> tuple[str, InlineKeyboardM
         parts.append(f"Заявка #{order['id']}: {_e(order['tariff'])}, {_status_label(order['status'])}{closed}")
     if lead["blocked"]:
         parts.append(f"⛔ Заблокирован: {_e(lead['block_reason'] or 'без причины')}")
+    if lead["manual_mode"]:
+        parts.append("🙋 Диалог ведёте вы — бот этому человеку не отвечает и не прогревает")
     if info["dialog"]:
         parts.append("\n<b>Последние сообщения</b>")
         for line in info["dialog"]:
@@ -257,6 +272,10 @@ def render_lead_card(lead_id: int, note: str = "") -> tuple[str, InlineKeyboardM
         rows.append([_btn(f"📋 Заявка #{order['id']}", f"ord:{order['id']}")])
     if lead["blocked"]:
         rows.append([_btn("🔓 Разблокировать", f"lead_unblock:{lead['id']}")])
+    if lead["manual_mode"]:
+        rows.append([_btn("🤖 Вернуть диалог боту", f"lead_manual:{lead['id']}:off")])
+    else:
+        rows.append([_btn("🙋 Веду сам (бот молчит)", f"lead_manual:{lead['id']}:on")])
     rows.append([_btn("« Лиды", "menu:leads")])
     return "\n".join(parts), InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -419,6 +438,7 @@ def render_candidate(offset: int, note: str = "", only_high: bool = False) -> tu
         (note + "\n\n" if note else "")
         + f"<b>{title} {offset + 1} из {total}</b>{maybe}\n"
         f"<b>{_e(author)}</b>\n\n"
+        f"<b>Когда написал:</b> {_fmt_posted(c['posted_at'])}\n"
         f"<b>Что написал:</b> «{_e(c['quote'])}»\n\n"
         f"<b>Почему это лид:</b> {_e(c['reason'])}\n\n"
         f"<b>Вариант первого сообщения</b> (нажмите, чтобы скопировать):\n<code>{_e(c['opener_text'])}</code>"
@@ -760,6 +780,22 @@ async def cb_unblock(cb: CallbackQuery) -> None:
         db.unblock_lead(conn, lead_id)
     logger.info("agent: lead %s unblocked by %s", lead_id, cb.from_user.id)
     await _show(cb, render_lead_card(lead_id, note="🔓 Разблокирован — бот снова будет отвечать этому человеку."))
+
+
+@router.callback_query(F.data.regexp(r"^lead_manual:\d+:(on|off)$"))
+async def cb_manual(cb: CallbackQuery) -> None:
+    if not await _guard(cb):
+        return
+    _, lead_id, mode = cb.data.split(":")
+    on = mode == "on"
+    with db.session() as conn:
+        db.set_manual_mode(conn, int(lead_id), on)
+    logger.info("agent: lead %s manual_mode=%s by %s", lead_id, on, cb.from_user.id)
+    note = (
+        "🙋 Теперь диалог ведёте вы — бот молчит. Ваши сообщения и ответы человека сохраняются в истории."
+        if on else "🤖 Диалог снова ведёт бот — он продолжит с учётом всей переписки."
+    )
+    await _show(cb, render_lead_card(int(lead_id), note=note))
 
 
 @router.callback_query(F.data == "cat:pick")

@@ -257,7 +257,8 @@ def list_candidates(
                raw_messages.url AS message_url,
                raw_messages.author AS author_name,
                raw_messages.author_username AS author_username,
-               raw_messages.author_tg_id AS author_tg_id
+               raw_messages.author_tg_id AS author_tg_id,
+               raw_messages.posted_at AS posted_at
         FROM catch_candidates
         JOIN raw_messages ON raw_messages.id = catch_candidates.raw_message_id
         {clause}

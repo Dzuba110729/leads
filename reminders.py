@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 import bot as bot_module
 import db
+import runtime
 from config import CONFIG
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,7 @@ async def _send_reminder(bot, userbot, tg_id: int, text: str) -> None:
             logger.info("cashier bot cannot reach %s (%s), falling back to userbot", tg_id, exc)
     if userbot is None:
         raise RuntimeError("no channel to send reminder")
-    await userbot.send_message(tg_id, text)
+    runtime.remember_auto_sent(tg_id, await userbot.send_message(tg_id, text))
 
 
 async def run_once(bot: "bot_module.Bot | None", userbot=None) -> None:

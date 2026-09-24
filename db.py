@@ -87,7 +87,11 @@ SCHEMA: dict[str, str] = {
 # Колонки, которые могли появиться позже — для идемпотентной эволюции схемы
 # (таблица -> {колонка: DDL-фрагмент типа/дефолта})
 ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
-    "leads": {"dialog_context": "TEXT", "last_score": "INTEGER", "last_score_at": "TEXT"},
+    "leads": {
+        "dialog_context": "TEXT", "last_score": "INTEGER", "last_score_at": "TEXT",
+        # 1 = диалог ведёт менеджер вручную («Веду сам» в ТГ-агенте): продавец не отвечает и не прогревает
+        "manual_mode": "INTEGER NOT NULL DEFAULT 0",
+    },
     "orders": {},
     "handoff": {},
     "meta": {},
@@ -172,6 +176,20 @@ def get_or_create_lead(conn: sqlite3.Connection, tg_id: int, username: str | Non
     return conn.execute("SELECT * FROM leads WHERE id = ?", (cur.lastrowid,)).fetchone()
 
 
+
+def ensure_lead(conn: sqlite3.Connection, tg_id: int, username: str | None) -> sqlite3.Row:
+    """Лид, которому менеджер написал первым: заводим карточку, но last_seen_at не трогаем —
+    это время последнего сообщения ОТ лида."""
+    row = conn.execute("SELECT * FROM leads WHERE tg_id = ?", (tg_id,)).fetchone()
+    if row:
+        return row
+    return get_or_create_lead(conn, tg_id, username, source="dm")
+
+
+def set_manual_mode(conn: sqlite3.Connection, lead_id: int, on: bool) -> None:
+    conn.execute("UPDATE leads SET manual_mode = ? WHERE id = ?", (1 if on else 0, lead_id))
+
+
 # Сколько последних реплик держим в dialog_context (не вся история, см. SCORING_SYSTEM_PROMPT:
 # "не помнить между вызовами" - это скользящее окно контекста, а не картотека).
 DIALOG_CONTEXT_MAX_TURNS = 12
@@ -250,6 +268,7 @@ def active_leads_for_warmup(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         """
         SELECT * FROM leads
         WHERE blocked = 0
+          AND manual_mode = 0
           AND next_step_idx < 3
           AND id NOT IN (SELECT lead_id FROM orders WHERE closed = 0)
         """
