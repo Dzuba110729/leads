@@ -12,6 +12,7 @@ import kp
 import llm
 from prompts import (
     BUSINESS_CONTEXT_OG1,
+    CLOSING_PROMPT_OG1,
     HEURISTIC_SCORE_KEYWORDS,
     ORIENTIR_TEMPLATE,
     SCORING_SYSTEM_PROMPT,
@@ -37,6 +38,7 @@ class ScoreResult:
     band: str
     reasoning: str
     source: str  # 'llm' | 'heuristic'
+    refusal: bool = False  # лид отказался / вопрос уже решён — вежливо закрываем диалог
 
 
 def band_for_score(score: int) -> str:
@@ -70,6 +72,7 @@ def score_message(text: str) -> ScoreResult:
             band=result.get("band") or band_for_score(score),
             reasoning=str(result.get("reasoning", "")),
             source="llm",
+            refusal=bool(result.get("refusal", False)),
         )
     score = _heuristic_score(text)
     return ScoreResult(score=score, band=band_for_score(score), reasoning="эвристика по ключевым словам", source="heuristic")
@@ -93,6 +96,11 @@ def generate_touch(band: str, funnel_stage: str, dialog_text: str) -> str:
         return generated
     # Фолбэк без LLM: шаблон догрева по бэнду, нейтральный
     return WARMUP_STEP_TEXTS_OG1.get(1, "Спасибо за интерес! Если появятся вопросы про тарифы og1 - пишите.")
+
+
+def generate_closing(dialog_text: str) -> str | None:
+    """Короткое тёплое завершение диалога после отказа; None, если ИИ не ответил (шаблон не шлём)."""
+    return llm.call_text(f"{TEMPLATE_A_OG1}\n\n{CLOSING_PROMPT_OG1}", dialog_text)
 
 
 def warmup_step_text(silence_days: int) -> str | None:

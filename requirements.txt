@@ -12,3 +12,4 @@ pytest>=8.2
 google-api-python-client>=2.140
 google-auth>=2.30
 google-auth-oauthlib>=1.2
+faster-whisper>=1.0

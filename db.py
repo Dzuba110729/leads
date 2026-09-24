@@ -91,6 +91,10 @@ ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "dialog_context": "TEXT", "last_score": "INTEGER", "last_score_at": "TEXT",
         # 1 = диалог ведёт менеджер вручную («Веду сам» в ТГ-агенте): продавец не отвечает и не прогревает
         "manual_mode": "INTEGER NOT NULL DEFAULT 0",
+        # id последнего обработанного входящего: догонялка после перезапуска не отвечает дважды
+        "last_in_msg_id": "INTEGER NOT NULL DEFAULT 0",
+        # когда лид отказался и получил вежливое завершение — второй раз не прощаемся
+        "declined_at": "TEXT",
     },
     "orders": {},
     "handoff": {},
@@ -184,6 +188,19 @@ def ensure_lead(conn: sqlite3.Connection, tg_id: int, username: str | None) -> s
     if row:
         return row
     return get_or_create_lead(conn, tg_id, username, source="dm")
+
+
+def claim_incoming_message(conn: sqlite3.Connection, lead_id: int, msg_id: int) -> bool:
+    """True, если это входящее ещё не обрабатывали (id сообщений в личке растут монотонно)."""
+    cur = conn.execute(
+        "UPDATE leads SET last_in_msg_id = ? WHERE id = ? AND last_in_msg_id < ?", (msg_id, lead_id, msg_id)
+    )
+    return cur.rowcount == 1
+
+
+def mark_declined(conn: sqlite3.Connection, lead_id: int) -> None:
+    """Лид отказался: запоминаем и останавливаем прогрев (next_step_idx=3 — последний шаг пройден)."""
+    conn.execute("UPDATE leads SET declined_at = ?, next_step_idx = 3 WHERE id = ?", (now(), lead_id))
 
 
 def set_manual_mode(conn: sqlite3.Connection, lead_id: int, on: bool) -> None:

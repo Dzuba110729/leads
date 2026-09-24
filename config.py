@@ -148,6 +148,8 @@ class Config:
         default_factory=lambda: [int(x) for x in _list("AGENT_ALLOWED_IDS", "") if x.isdigit()]
     )
     agent_model: str = os.getenv("AGENT_MODEL", "claude-sonnet-5")
+    # Модель faster-whisper для расшифровки голосовых лидов (локально, аудио никуда не уходит)
+    whisper_model: str = os.getenv("WHISPER_MODEL", "small")
 
     # Google Docs для отчётов агента. Основной путь — вход от имени владельца (OAuth-клиент
     # типа Desktop + токен из google_login.py): документы лежат на его Диске. Сервисный

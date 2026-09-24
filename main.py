@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import tempfile
 from datetime import datetime, timedelta, timezone
 
 import uvicorn
@@ -18,6 +19,7 @@ import guard
 import pipeline
 import reminders
 import runtime
+import voice
 from config import CONFIG
 from crm import app as crm_app
 
@@ -32,7 +34,7 @@ def _is_group_signal(text: str) -> bool:
 
 async def handle_incoming(event, source: str) -> None:
     text = (event.raw_text or "").strip()
-    if not text:
+    if not text and (source != "dm" or not event.media):
         return
 
     sender = await event.get_sender()
@@ -47,13 +49,23 @@ async def handle_incoming(event, source: str) -> None:
         if not _is_group_signal(text):
             return
 
+    who = f"@{username}" if username else f"ID {tg_id}"
     with db.session() as conn:
         lead = db.get_or_create_lead(conn, tg_id, username, source=source)
         if lead["blocked"]:
             return
+        if not db.claim_incoming_message(conn, lead["id"], event.id):
+            return  # уже обработано — догонялка после перезапуска прошла по нему повторно
+
+    if not text:
+        text = await _media_to_text(event, lead, who)
+        if text is None:
+            return
+
+    with db.session() as conn:
         dialog_context = db.append_dialog_context(conn, lead["id"], "лид", text)
-        if lead["manual_mode"]:
-            return  # «Веду сам»: реплику сохранили для контекста, отвечает менеджер
+    if lead["manual_mode"]:
+        return  # «Веду сам»: реплику сохранили для контекста, отвечает менеджер
 
     # Шаг 8: защита от инъекций - до любого другого LLM-вызова.
     # LLM-клиент синхронный, поэтому все его вызовы уходят в поток - иначе на 2-5 с
@@ -69,7 +81,6 @@ async def handle_incoming(event, source: str) -> None:
             )
         return
 
-    who = f"@{username}" if username else f"ID {tg_id}"
     # Сбой ИИ (кончились деньги, неверный ключ): живым людям шаблонами не отвечаем — молчим
     # и предупреждаем оператора. Ответ о статусе заявки ИИ не нужен, его даём и при сбое.
     guard_outage = guard_result.source == "fallback_pass" and alerts.llm_configured()
@@ -105,6 +116,8 @@ async def handle_incoming(event, source: str) -> None:
         db.set_lead_score(conn, lead["id"], score_result.score)
 
     if score_result.band == "cold":
+        if score_result.refusal and not lead["declined_at"]:
+            await _close_politely(event, lead, dialog_context, who)
         return  # молчим
 
     if score_result.band == "very_hot":
@@ -126,25 +139,96 @@ async def handle_incoming(event, source: str) -> None:
         db.record_touch(conn, lead["id"], next_step_idx=0)
 
 
+async def _close_politely(event, lead, dialog_context: str, who: str) -> None:
+    """Лид отказался или вопрос уже решён: одно тёплое завершение вместо молчания, прогрев стоп."""
+    closing, failed = await asyncio.to_thread(alerts.run_llm_step, pipeline.generate_closing, dialog_context)
+    if failed or not closing:
+        await alerts.report_llm_outage(who)
+        return
+    await _reply(event, closing, lead_id=lead["id"])
+    with db.session() as conn:
+        db.mark_declined(conn, lead["id"])
+    logger.info("DECLINED lead=%s: отказ, отправлено вежливое завершение", lead["tg_id"])
+
+
+# Голосовые длиннее не расшифровываем: это минуты работы процессора ради одного сообщения
+VOICE_MAX_SECONDS = 300
+
+
+def _media_kind(event) -> str:
+    if event.voice:
+        return "голосовое"
+    if event.video_note:
+        return "видеосообщение"
+    if event.sticker:
+        return "стикер"
+    if event.gif:
+        return "GIF"
+    if event.photo:
+        return "фото"
+    if event.video:
+        return "видео"
+    if event.document:
+        return "файл"
+    return "вложение"
+
+
+async def _transcribe(event) -> str | None:
+    duration = getattr(event.file, "duration", None) or 0
+    if duration > VOICE_MAX_SECONDS:
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        path = await event.download_media(file=tmp)
+        if not path:
+            return None
+        return await asyncio.to_thread(voice.transcribe, path)
+
+
+async def _media_to_text(event, lead, who: str) -> str | None:
+    """Сообщение без текста. Голосовое и кружок расшифровываем и дальше обрабатываем как текст.
+    Стикер, фото, файл — бот на них не отвечает: ставим пометку в истории и зовём менеджера."""
+    kind = _media_kind(event)
+    if kind in ("голосовое", "видеосообщение"):
+        text = await _transcribe(event)
+        if text:
+            logger.info("VOICE lead=%s: %s расшифровано (%s симв.)", lead["tg_id"], kind, len(text))
+            return f"[{kind}] {text}"
+        kind += ", не удалось расшифровать"
+    with db.session() as conn:
+        db.append_dialog_context(conn, lead["id"], "лид", f"[{kind}]")
+    logger.info("MEDIA lead=%s: %s, бот не отвечает", lead["tg_id"], kind)
+    if not lead["manual_mode"]:
+        await alerts.notify_operators(
+            f"📎 {who} прислал(а) {kind}. Бот на такое не отвечает — посмотрите сами в переписке "
+            "продающего аккаунта и ответьте, если нужно."
+        )
+    return None
+
+
 # Автоответ продавца тоже приходит в обработчик исходящих, а его id запоминается только после
 # отправки — ждём немного, прежде чем решать, кто написал: бот или менеджер.
 AUTO_SENT_SETTLE_SECONDS = 2
 
 
-async def handle_outgoing(event) -> None:
+async def handle_outgoing(event, catch_up: bool = False) -> None:
     """Сообщение, которое менеджер сам написал лиду с продающего аккаунта (с телефона или компьютера).
-    Пишем его в историю диалога, чтобы ИИ знал, с чем менеджер зашёл, и продолжал разговор с этого места."""
+    Пишем его в историю диалога, чтобы ИИ знал, с чем менеджер зашёл, и продолжал разговор с этого места.
+    catch_up — прогон догонялки: id автоответов прошлого запуска не известны, поэтому то, что уже
+    есть в истории (ответ бота или уже записанная реплика менеджера), пропускаем по тексту."""
     text = (event.raw_text or "").strip()
     if not text or str(event.chat_id) == str(CONFIG.operator_chat):
         return
-    await asyncio.sleep(AUTO_SENT_SETTLE_SECONDS)
-    if runtime.is_auto_sent(event.chat_id, event.id):
-        return
+    if not catch_up:
+        await asyncio.sleep(AUTO_SENT_SETTLE_SECONDS)
+        if runtime.is_auto_sent(event.chat_id, event.id):
+            return
     chat = await event.get_chat()
     if getattr(chat, "bot", False) or getattr(chat, "is_self", False):
         return
     with db.session() as conn:
         lead = db.ensure_lead(conn, chat.id, getattr(chat, "username", None))
+        if catch_up and text in (lead["dialog_context"] or ""):
+            return
         db.append_dialog_context(conn, lead["id"], "менеджер", text)
     logger.info("MANAGER lead=%s: сообщение менеджера записано в диалог", chat.id)
 
@@ -239,6 +323,54 @@ async def daily_warmup_task(userbot, check_every_seconds: int = 300) -> None:
         await asyncio.sleep(check_every_seconds)
 
 
+USERBOT_ALIVE_KEY = "userbot_alive_at"
+HEARTBEAT_SECONDS = 60
+CATCH_UP_MAX = timedelta(days=2)
+
+
+async def userbot_heartbeat() -> None:
+    """Раз в минуту отмечаем, что продавец на связи: догонялка после перезапуска начнёт с этого места."""
+    while True:
+        with db.session() as conn:
+            db.set_meta(conn, USERBOT_ALIVE_KEY, datetime.now(timezone.utc).isoformat())
+        await asyncio.sleep(HEARTBEAT_SECONDS)
+
+
+async def catch_up_missed(userbot, alive_at: str | None) -> int:
+    """Личные сообщения, пришедшие, пока процесс был выключен (перезапуск, сбой). Telethon со
+    StringSession их после старта не присылает, поэтому проходим по свежим диалогам сами.
+    Дважды не отвечаем: входящие отсекает last_in_msg_id, исходящие — сверка с историей."""
+    if not alive_at:
+        return 0  # первый запуск с догонялкой: точки отсчёта ещё нет
+    now = datetime.now(timezone.utc)
+    since = max(datetime.fromisoformat(alive_at) - timedelta(seconds=2 * HEARTBEAT_SECONDS), now - CATCH_UP_MAX)
+    handled = 0
+    try:
+        async for dialog in userbot.iter_dialogs(limit=100):
+            if not dialog.is_user or dialog.date is None or dialog.date < since:
+                continue  # закреплённые диалоги идут первыми, поэтому не break, а continue
+            entity = dialog.entity
+            if getattr(entity, "bot", False) or getattr(entity, "is_self", False):
+                continue
+            missed = []
+            async for message in userbot.iter_messages(entity, limit=30):
+                if message.date < since:
+                    break
+                missed.append(message)
+            for message in reversed(missed):
+                if getattr(message, "action", None) is not None:
+                    continue  # служебные: «вступил в чат», звонки и т.п.
+                if message.out:
+                    await handle_outgoing(message, catch_up=True)
+                else:
+                    await handle_incoming(message, source="dm")
+                handled += 1
+    except Exception:
+        logger.exception("catch-up: проход по пропущенным сообщениям упал")
+    logger.info("CATCH-UP: просмотрено сообщений с %s: %s", since.isoformat(timespec="seconds"), handled)
+    return handled
+
+
 def build_userbot() -> TelegramClient | None:
     if not (CONFIG.tg_api_id and CONFIG.tg_api_hash):
         return None
@@ -274,6 +406,10 @@ async def main() -> None:
 
         await userbot.start(phone=CONFIG.tg_phone or None)
         runtime.userbot = userbot
+        with db.session() as conn:
+            alive_at = db.get_meta(conn, USERBOT_ALIVE_KEY)
+        tasks.append(catch_up_missed(userbot, alive_at))
+        tasks.append(userbot_heartbeat())
         tasks.append(userbot.run_until_disconnected())
     else:
         logger.warning("TG_API_ID/TG_API_HASH не заданы — userbot не запущен")
