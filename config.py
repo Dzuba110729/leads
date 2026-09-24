@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+ENV_PATH = Path(__file__).with_name(".env")
+
+load_dotenv(ENV_PATH)
 
 
 def _bool(name: str, default: str) -> bool:
@@ -157,3 +161,17 @@ class Config:
 
 
 CONFIG = Config()
+
+
+def save_env_value(name: str, value: str, env_path: Path | None = None) -> None:
+    """Записывает NAME=value в .env (заменяет строку или дописывает), чтобы переключатели
+    из ТГ-агента переживали перезапуск. Остальные строки файла не трогает."""
+    path = env_path or ENV_PATH
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    line = f"{name}={value}"
+    pattern = re.compile(rf"^{re.escape(name)}=.*$", re.MULTILINE)
+    if pattern.search(text):
+        text = pattern.sub(lambda _: line, text, count=1)
+    else:
+        text = text + ("" if text.endswith("\n") or not text else "\n") + line + "\n"
+    path.write_text(text, encoding="utf-8")

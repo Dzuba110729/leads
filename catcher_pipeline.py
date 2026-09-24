@@ -177,25 +177,12 @@ def run_p1_on_batch(messages: list, reply_map: dict | None = None) -> tuple[list
             if isinstance(candidates, list):
                 return candidates, True
         except json.JSONDecodeError:
-            logger.warning("П1: не удалось распарсить ответ LLM как JSON, фолбэк на эвристику")
+            logger.warning("П1: не удалось распарсить ответ LLM как JSON, пачка останется неразобранной")
 
-    # Деградированный режим без LLM: грубый предфильтр по словам-сигналам (без домысливания
-    # цитаты/повода/захода - на выходе только сырой факт совпадения, требует ручной проверки).
-    candidates = []
-    for idx, m in enumerate(messages, start=1):
-        lowered = m["text"].lower()
-        if any(word in lowered for word in CONFIG.group_signal_words):
-            candidates.append(
-                {
-                    "n": idx,
-                    "quote": m["text"],
-                    "reason": "совпадение по слову-сигналу (эвристика, LLM недоступен)",
-                    "confidence": "maybe",
-                    "contact_url": _col(m, "url"),
-                    "opener_text": "Проверьте вручную - LLM-заготовка недоступна.",
-                }
-            )
-    return candidates, False
+    # Модель не отработала — кандидатов не выдумываем. Раньше здесь был поиск по словам-сигналам,
+    # но подстрочное совпадение (например, «со» внутри «состоянии») при отключении ИИ заваливало
+    # список тысячами мусорных «лидов». Сообщения останутся неразобранными и уйдут в следующий прогон.
+    return [], False
 
 
 def _find_matching_message_id(quote: str, messages: list) -> int | None:

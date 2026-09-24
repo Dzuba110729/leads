@@ -75,7 +75,6 @@ def test_answer_runs_tool_loop(tmp_path, monkeypatch):
     ]
     fake = _FakeClient(script)
     monkeypatch.setattr(agent_bot, "_client", fake)
-    agent_bot._history.clear()
 
     reply = asyncio.run(agent_bot.answer(_FakeBot(), 42, "сколько лидов?"))
 
@@ -83,7 +82,9 @@ def test_answer_runs_tool_loop(tmp_path, monkeypatch):
     second_call = fake.messages.calls[1]["messages"]
     assert second_call[-1]["content"][0]["type"] == "tool_result"
     assert '"new": 1' in second_call[-1]["content"][0]["content"]
-    assert [m["role"] for m in agent_bot._history[42]] == ["user", "assistant"]
+    with db.session() as conn:
+        history = db.load_agent_history(conn, 42, 10)
+    assert [m["role"] for m in history] == ["user", "assistant"]
 
 
 def test_start_catcher_run_sends_result_later(tmp_path, monkeypatch):

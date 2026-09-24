@@ -108,5 +108,27 @@ async def notify_status_change(bot: Bot, tg_id: int, text: str) -> None:
     await bot.send_message(tg_id, text)
 
 
+async def advance_and_notify(order_id: int) -> str:
+    """Следующий статус заявки + уведомление лида через бота-хэндоффа. Общая для CRM и ТГ-агента."""
+    with db.session() as conn:
+        order = db.get_order(conn, order_id)
+        if order is None:
+            raise ValueError(f"заявка {order_id} не найдена")
+        new_status = db.advance_status(conn, order_id)
+        lead = conn.execute("SELECT * FROM leads WHERE id = ?", (order["lead_id"],)).fetchone()
+
+    if lead is not None and CONFIG.bot_token:
+        bot = build_bot()
+        try:
+            await notify_status_change(
+                bot, lead["tg_id"], f"Статус вашей заявки в og1 обновлён: {db.STATUS_LABELS.get(new_status, new_status)}"
+            )
+        except Exception:
+            logger.exception("failed to notify lead about status change")
+        finally:
+            await bot.session.close()
+    return new_status
+
+
 def deep_link_for_order(order_id: int) -> str:
     return f"https://t.me/{CONFIG.bot_username}?start=order_{order_id}"

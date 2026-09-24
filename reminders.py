@@ -84,12 +84,13 @@ async def run_once(bot: "bot_module.Bot | None", userbot=None) -> None:
 
 
 async def run_forever(bot: "bot_module.Bot | None", userbot=None, interval_seconds: int = 300) -> None:
+    # Цикл крутится всегда и проверяет флаг на каждом шаге — его можно включить из ТГ-агента
     if not CONFIG.scheduler_enabled:
-        logger.info("scheduler disabled (SCHEDULER_ENABLED=0), reminders loop not started")
-        return
+        logger.info("scheduler disabled (SCHEDULER_ENABLED=0), reminders wait until it is enabled")
     while True:
-        try:
-            await run_once(bot, userbot)
-        except Exception:
-            logger.exception("reminders.run_once failed")
+        if CONFIG.scheduler_enabled:
+            try:
+                await run_once(bot, userbot)
+            except Exception:
+                logger.exception("reminders.run_once failed")
         await asyncio.sleep(interval_seconds)

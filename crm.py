@@ -35,14 +35,7 @@ app = FastAPI(title="og1 CRM")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
-STATUS_LABELS = {
-    "заявка": "Заявка",
-    "пробный_день": "Пробный день",
-    "документы": "Документы",
-    "договор": "Договор",
-    "оплачено": "Оплачено",
-    "зачислен": "Зачислен",
-}
+STATUS_LABELS = db.STATUS_LABELS
 
 PUBLIC_PATHS = {"/login"}
 
@@ -179,23 +172,12 @@ async def orders_page(request: Request):
 
 @app.post("/orders/{order_id}/advance")
 async def advance(request: Request, order_id: int):
+    try:
+        await bot_module.advance_and_notify(order_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="order not found")
     with db.session() as conn:
-        order = db.get_order(conn, order_id)
-        if order is None:
-            raise HTTPException(status_code=404, detail="order not found")
-        new_status = db.advance_status(conn, order_id)
-        lead = conn.execute("SELECT * FROM leads WHERE id = ?", (order["lead_id"],)).fetchone()
         orders = db.list_open_orders(conn)
-
-    if lead is not None and CONFIG.bot_token:
-        try:
-            bot = bot_module.build_bot()
-            await bot_module.notify_status_change(
-                bot, lead["tg_id"], f"Статус вашей заявки в og1 обновлён: {new_status}"
-            )
-            await bot.session.close()
-        except Exception:
-            logger.exception("failed to notify lead about status change")
 
     if _is_htmx(request):
         return templates.TemplateResponse(request, "_orders_board.html", {"request": request, "columns": _order_columns(orders)}

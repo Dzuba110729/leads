@@ -6,16 +6,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import uvicorn
 from telethon import TelegramClient, events
 
+import alerts
 import bot as bot_module
 import db
 import guard
 import pipeline
 import reminders
+import runtime
 from config import CONFIG
 from crm import app as crm_app
 
@@ -65,6 +67,11 @@ async def handle_incoming(event, source: str) -> None:
             )
         return
 
+    who = f"@{username}" if username else f"ID {tg_id}"
+    # Сбой ИИ (кончились деньги, неверный ключ): живым людям шаблонами не отвечаем — молчим
+    # и предупреждаем оператора. Ответ о статусе заявки ИИ не нужен, его даём и при сбое.
+    guard_outage = guard_result.source == "fallback_pass" and alerts.llm_configured()
+
     # Шаг 2.2: вопрос о статусе заказа - отвечаем по факту, без скоринга
     if pipeline.is_status_question(text):
         with db.session() as conn:
@@ -76,32 +83,52 @@ async def handle_incoming(event, source: str) -> None:
         await _reply(event, answer, lead_id=lead["id"])
         return
 
+    if guard_outage:
+        await alerts.report_llm_outage(who)
+        return
+
     # Шаг 2.3: скоринг П1 - с учётом контекста диалога, не только последней реплики
     score_result = await asyncio.to_thread(pipeline.score_message, dialog_context)
+    if score_result.source != "llm" and alerts.llm_configured():
+        await alerts.report_llm_outage(who)
+        return
+    if score_result.source == "llm":
+        await alerts.report_llm_ok()
     logger.info(
         "SCORE lead=%s score=%s band=%s source=%s reasoning=%s",
         tg_id, score_result.score, score_result.band, score_result.source, score_result.reasoning,
     )
 
+    with db.session() as conn:
+        db.set_lead_score(conn, lead["id"], score_result.score)
+
     if score_result.band == "cold":
         return  # молчим
 
     if score_result.band == "very_hot":
-        await _escalate(event, lead, dialog_context, score_result)
+        await _escalate(event, lead, dialog_context, score_result, who)
         return
 
     # тёплый/горячий - касание П5. min_touch_gap_hours здесь НЕ применяется: это живой ответ
     # на входящее сообщение лида (шаг 2 методики - отвечаем на каждое сообщение по баллу), а не
     # проактивный прогрев затихших (шаг 3, daily_warmup_task) - там зазор по-прежнему действует.
     funnel_stage = "интерес"  # PLACEHOLDER: воронка не детализирована пользователем (см. og1/PLAN.md п.6)
-    touch = await asyncio.to_thread(pipeline.generate_touch, score_result.band, funnel_stage, dialog_context)
+    touch, failed = await asyncio.to_thread(
+        alerts.run_llm_step, pipeline.generate_touch, score_result.band, funnel_stage, dialog_context
+    )
+    if failed:  # generate_touch при сбое тихо подставляет шаблон — такой не шлём
+        await alerts.report_llm_outage(who)
+        return
     await _reply(event, touch, lead_id=lead["id"])
     with db.session() as conn:
         db.record_touch(conn, lead["id"], next_step_idx=0)
 
 
-async def _escalate(event, lead, dialog_text: str, score_result: pipeline.ScoreResult) -> None:
-    extracted = await asyncio.to_thread(pipeline.extract_order, dialog_text)
+async def _escalate(event, lead, dialog_text: str, score_result: pipeline.ScoreResult, who: str = "") -> None:
+    extracted, failed = await asyncio.to_thread(alerts.run_llm_step, pipeline.extract_order, dialog_text)
+    if failed:  # без ИИ заявка собралась бы из догадок — ждём, пока ИИ заработает
+        await alerts.report_llm_outage(who or f"ID {lead['tg_id']}")
+        return
     with db.session() as conn:
         order = db.create_order(
             conn,
@@ -163,16 +190,28 @@ async def warmup_once(userbot) -> int:
     return sent
 
 
-async def daily_warmup_task(userbot) -> None:
+WARMUP_INTERVAL = timedelta(hours=24)
+
+
+async def daily_warmup_task(userbot, check_every_seconds: int = 300) -> None:
+    """Раз в сутки — проход прогрева. Цикл крутится всегда и смотрит на CONFIG.scheduler_enabled
+    на каждом шаге, чтобы напоминания можно было включить из ТГ-агента без перезапуска. Время
+    последнего прохода — в meta, чтобы перезапуск процесса не вызывал внеочередную рассылку."""
     if not CONFIG.scheduler_enabled:
-        logger.info("scheduler disabled (SCHEDULER_ENABLED=0), warmup loop not started")
-        return
+        logger.info("scheduler disabled (SCHEDULER_ENABLED=0), warmup waits until it is enabled")
     while True:
-        try:
-            await warmup_once(userbot)
-        except Exception:
-            logger.exception("daily_warmup_task iteration failed")
-        await asyncio.sleep(24 * 3600)
+        if CONFIG.scheduler_enabled:
+            try:
+                with db.session() as conn:
+                    last = db.get_meta(conn, "warmup_last_run")
+                due = last is None or datetime.now(timezone.utc) - datetime.fromisoformat(last) >= WARMUP_INTERVAL
+                if due:
+                    await warmup_once(userbot)
+                    with db.session() as conn:
+                        db.set_meta(conn, "warmup_last_run", db.now())
+            except Exception:
+                logger.exception("daily_warmup_task iteration failed")
+        await asyncio.sleep(check_every_seconds)
 
 
 def build_userbot() -> TelegramClient | None:
@@ -205,12 +244,14 @@ async def main() -> None:
             await handle_incoming(event, source="group")
 
         await userbot.start(phone=CONFIG.tg_phone or None)
+        runtime.userbot = userbot
         tasks.append(userbot.run_until_disconnected())
     else:
         logger.warning("TG_API_ID/TG_API_HASH не заданы — userbot не запущен")
 
     if cashier_bot is not None:
         from bot import router_dp
+        runtime.cashier_bot_enabled = True
         tasks.append(router_dp.start_polling(cashier_bot))
     else:
         logger.warning("BOT_TOKEN не задан — бот-хэндофф не запущен")
@@ -228,7 +269,28 @@ async def main() -> None:
     server = uvicorn.Server(config)
     tasks.append(server.serve())
 
-    await asyncio.gather(*tasks)
+    # SIGTERM гасят только uvicorn и aiogram, а run_until_disconnected ждёт вечно — поэтому
+    # при завершении любой части останавливаем остальные, иначе процесс виснет и launchd
+    # не может его перезапустить.
+    # Фоновые циклы при SCHEDULER_ENABLED=0 завершаются сразу — это нормально; сигнал к остановке —
+    # завершение CRM (uvicorn ловит SIGTERM) или падение любой задачи.
+    running = [asyncio.ensure_future(t) for t in tasks]
+    server_task = running[-1]
+    try:
+        pending = set(running)
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            failed = [t for t in done if not t.cancelled() and t.exception()]
+            for t in failed:
+                logger.error("задача упала, останавливаем процесс", exc_info=t.exception())
+            if failed or server_task in done:
+                break
+    finally:
+        for t in running:
+            t.cancel()
+        await asyncio.gather(*running, return_exceptions=True)
+        if userbot is not None:
+            await userbot.disconnect()
 
 
 if __name__ == "__main__":
