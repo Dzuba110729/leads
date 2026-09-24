@@ -251,3 +251,19 @@ def test_catch_up_answers_missed_and_skips_already_known(tmp_path, monkeypatch):
 
 def test_catch_up_skipped_without_previous_heartbeat():
     assert asyncio.run(main.catch_up_missed(_FakeClient([]), None)) == 0
+
+
+def test_send_to_lead_falls_back_to_username():
+    class _Client:
+        def __init__(self):
+            self.sent = []
+
+        async def send_message(self, peer, text):
+            if isinstance(peer, int):
+                raise ValueError("Could not find the input entity")
+            self.sent.append(peer)
+            return SimpleNamespace(id=5)
+
+    client = _Client()
+    asyncio.run(runtime.send_to_lead(client, 730, "lead730", "текст"))
+    assert client.sent == ["lead730"] and runtime.is_auto_sent(730, 5)

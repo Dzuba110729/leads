@@ -287,7 +287,7 @@ async def warmup_once(userbot) -> int:
                 logger.info("[DRY_RUN warmup] lead=%s silence=%sd text=%s", lead["tg_id"], silence_days, text)
             else:
                 try:
-                    runtime.remember_auto_sent(lead["tg_id"], await userbot.send_message(lead["tg_id"], text))
+                    await runtime.send_to_lead(userbot, lead["tg_id"], lead["username"], text)
                 except Exception:
                     logger.exception("warmup send failed lead=%s, skipping", lead["tg_id"])
                     continue

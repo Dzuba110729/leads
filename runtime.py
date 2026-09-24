@@ -21,3 +21,17 @@ def remember_auto_sent(chat_id: int, message) -> None:
 
 def is_auto_sent(chat_id: int, msg_id: int) -> bool:
     return (int(chat_id), msg_id) in auto_sent
+
+
+async def send_to_lead(userbot, tg_id: int, username: str | None, text: str):
+    """Сообщение лиду с продающего аккаунта. По числовому id Telethon отправляет, только если уже
+    видел этого человека в текущем запуске (StringSession не хранит кэш людей), иначе ValueError —
+    тогда шлём по @username. Отправленное помечается как автоответ, не как реплика менеджера."""
+    try:
+        message = await userbot.send_message(tg_id, text)
+    except ValueError:
+        if not username:
+            raise
+        message = await userbot.send_message(username, text)
+    remember_auto_sent(tg_id, message)
+    return message

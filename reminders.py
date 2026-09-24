@@ -42,7 +42,7 @@ def _elapsed_minutes(created_at: str) -> float:
     return (datetime.now(timezone.utc) - created).total_seconds() / 60
 
 
-async def _send_reminder(bot, userbot, tg_id: int, text: str) -> None:
+async def _send_reminder(bot, userbot, tg_id: int, text: str, username: str | None = None) -> None:
     if CONFIG.dry_run:
         logger.info("[DRY_RUN] remind %s: %s", tg_id, text)
         return
@@ -57,7 +57,7 @@ async def _send_reminder(bot, userbot, tg_id: int, text: str) -> None:
             logger.info("cashier bot cannot reach %s (%s), falling back to userbot", tg_id, exc)
     if userbot is None:
         raise RuntimeError("no channel to send reminder")
-    runtime.remember_auto_sent(tg_id, await userbot.send_message(tg_id, text))
+    await runtime.send_to_lead(userbot, tg_id, username, text)
 
 
 async def run_once(bot: "bot_module.Bot | None", userbot=None) -> None:
@@ -76,7 +76,7 @@ async def run_once(bot: "bot_module.Bot | None", userbot=None) -> None:
             lead = conn.execute("SELECT * FROM leads WHERE id = ?", (order["lead_id"],)).fetchone()
             text = REMINDER_TEXTS.get(new_stage, REMINDER_TEXTS[3])
             try:
-                await _send_reminder(bot, userbot, lead["tg_id"], text)
+                await _send_reminder(bot, userbot, lead["tg_id"], text, lead["username"])
             except Exception:
                 logger.exception("reminder for order %s (lead %s) failed, skipping", order["id"], lead["tg_id"])
                 continue
