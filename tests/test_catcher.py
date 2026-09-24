@@ -48,15 +48,14 @@ def test_mark_contacted_changes_status():
     assert updated["status"] == "contacted"
 
 
-def test_heuristic_fallback_matches_signal_words(monkeypatch):
+def test_no_llm_gives_no_candidates_and_leaves_batch_unprocessed(monkeypatch):
     monkeypatch.setattr("llm.available", lambda: False)
     messages = [
         {"author": "ivan", "text": "хотим перевести ребёнка на дистант", "url": "https://t.me/g/1"},
-        {"author": "petya", "text": "продам гараж недорого", "url": "https://t.me/g/2"},
+        {"author": "petya", "text": "продам коврик в хорошем состоянии", "url": "https://t.me/g/2"},
     ]
     candidates, ok = catcher_pipeline.run_p1_on_batch(messages)
-    assert len(candidates) == 1
-    assert "дистант" in candidates[0]["quote"]
+    assert candidates == []  # без модели ничего не выдумываем — мусорных «лидов» не будет
     assert ok is False  # модель не отработала - пачку нельзя считать разобранной
 
 

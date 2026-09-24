@@ -64,6 +64,16 @@ SCHEMA: dict[str, str] = {
             value TEXT
         )
     """,
+    # История переписки оператора с ТГ-агентом — переживает перезапуск процесса
+    "agent_history": """
+        CREATE TABLE IF NOT EXISTS agent_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """,
     "users": """
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,10 +87,11 @@ SCHEMA: dict[str, str] = {
 # Колонки, которые могли появиться позже — для идемпотентной эволюции схемы
 # (таблица -> {колонка: DDL-фрагмент типа/дефолта})
 ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
-    "leads": {"dialog_context": "TEXT"},
+    "leads": {"dialog_context": "TEXT", "last_score": "INTEGER", "last_score_at": "TEXT"},
     "orders": {},
     "handoff": {},
     "meta": {},
+    "agent_history": {},
     "users": {},
 }
 
@@ -92,6 +103,17 @@ ORDER_STATUSES = [
     "оплачено",
     "зачислен",
 ]
+
+STATUS_LABELS = {
+    "заявка": "Заявка",
+    "пробный_день": "Пробный день",
+    "документы": "Документы",
+    "договор": "Договор",
+    "оплачено": "Оплачено",
+    "зачислен": "Зачислен",
+}
+
+HOT_SCORE = 80
 
 
 def now() -> str:
@@ -165,6 +187,35 @@ def append_dialog_context(conn: sqlite3.Connection, lead_id: int, role: str, tex
     context = "\n".join(lines)
     conn.execute("UPDATE leads SET dialog_context = ? WHERE id = ?", (context, lead_id))
     return context
+
+
+def set_lead_score(conn: sqlite3.Connection, lead_id: int, score: int) -> None:
+    conn.execute("UPDATE leads SET last_score = ?, last_score_at = ? WHERE id = ?", (score, now(), lead_id))
+
+
+def get_lead(conn: sqlite3.Connection, lead_id: int) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
+
+
+def find_lead(conn: sqlite3.Connection, query: str) -> sqlite3.Row | None:
+    """По @username, username или Telegram-ID."""
+    q = query.strip().lstrip("@")
+    if q.isdigit():
+        row = conn.execute("SELECT * FROM leads WHERE tg_id = ? OR id = ?", (int(q), int(q))).fetchone()
+        if row:
+            return row
+    return conn.execute("SELECT * FROM leads WHERE lower(username) = lower(?)", (q,)).fetchone()
+
+
+def list_hot_leads(conn: sqlite3.Connection, limit: int = 10) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM leads WHERE blocked = 0 AND last_score >= ? ORDER BY last_score_at DESC LIMIT ?",
+        (HOT_SCORE, limit),
+    ).fetchall()
+
+
+def list_recent_leads(conn: sqlite3.Connection, limit: int = 10) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM leads ORDER BY last_seen_at DESC LIMIT ?", (limit,)).fetchall()
 
 
 def block_lead(conn: sqlite3.Connection, lead_id: int, reason: str) -> None:
@@ -282,6 +333,36 @@ def list_open_orders(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def list_open_orders_by_status(conn: sqlite3.Connection, status: str, limit: int = 10) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT orders.*, leads.tg_id AS lead_tg_id, leads.username AS lead_username
+        FROM orders
+        JOIN leads ON leads.id = orders.lead_id
+        WHERE orders.closed = 0 AND orders.status = ?
+        ORDER BY orders.created_at DESC
+        LIMIT ?
+        """,
+        (status, limit),
+    ).fetchall()
+
+
+def get_order_with_lead(conn: sqlite3.Connection, order_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT orders.*, leads.tg_id AS lead_tg_id, leads.username AS lead_username
+        FROM orders JOIN leads ON leads.id = orders.lead_id
+        WHERE orders.id = ?
+        """,
+        (order_id,),
+    ).fetchone()
+
+
+def next_status(status: str) -> str | None:
+    idx = ORDER_STATUSES.index(status)
+    return ORDER_STATUSES[idx + 1] if idx + 1 < len(ORDER_STATUSES) else None
+
+
 def list_orders_for_reminders(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT * FROM orders WHERE closed = 0 AND status = 'заявка'"
@@ -310,6 +391,37 @@ def get_meta(conn: sqlite3.Connection, key: str, default: str | None = None) -> 
 
 def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
     conn.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
+
+
+# --- agent_history ---------------------------------------------------------------
+
+def add_agent_message(conn: sqlite3.Connection, chat_id: int, role: str, content: str) -> None:
+    conn.execute(
+        "INSERT INTO agent_history (chat_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+        (chat_id, role, content, now()),
+    )
+
+
+def load_agent_history(conn: sqlite3.Connection, chat_id: int, limit: int) -> list[dict]:
+    """Последние `limit` реплик в хронологическом порядке, приведённые к виду, который
+    принимает API: начинается с user, роли чередуются (подряд идущие склеиваются)."""
+    rows = conn.execute(
+        "SELECT role, content FROM agent_history WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
+        (chat_id, limit),
+    ).fetchall()
+    messages: list[dict] = []
+    for r in reversed(rows):
+        if not messages and r["role"] != "user":
+            continue
+        if messages and messages[-1]["role"] == r["role"]:
+            messages[-1]["content"] += "\n\n" + r["content"]
+        else:
+            messages.append({"role": r["role"], "content": r["content"]})
+    return messages
+
+
+def clear_agent_history(conn: sqlite3.Connection, chat_id: int) -> None:
+    conn.execute("DELETE FROM agent_history WHERE chat_id = ?", (chat_id,))
 
 
 # --- users -----------------------------------------------------------------
