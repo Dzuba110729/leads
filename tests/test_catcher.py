@@ -177,3 +177,14 @@ def test_message_link_formats():
     assert catcher_tg.message_link(private, 93751, "x") == "https://t.me/c/2223334445/93751"
     small = SimpleNamespace(username=None, id=77)
     assert catcher_tg.message_link(small, 1, "https://t.me/+abc") == "https://t.me/+abc"
+
+
+def test_candidates_sorted_by_message_date_newest_first():
+    conn = _mem_conn()
+    source = catcher_db.add_source(conn, "tg", "https://t.me/test_group")
+    posted = {"old_tg": "2026-08-01T10:00:00+00:00", "new_vk": "1790000000", "mid_tg": "2026-09-01T10:00:00+00:00", "none": None}
+    for i, (author, when) in enumerate(posted.items()):
+        row = catcher_db.insert_raw_message(conn, source["id"], str(i), author, "ищу школу", None, when)
+        catcher_db.add_candidate(conn, row, "ищу школу", "r", None, "o", "maybe" if author == "new_vk" else "high")
+    order = [c["author_name"] for c in catcher_db.list_candidates(conn)]
+    assert order == ["new_vk", "mid_tg", "old_tg", "none"]

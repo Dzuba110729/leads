@@ -236,6 +236,11 @@ def add_candidate(
 CANDIDATES_PAGE_SIZE = 50
 
 
+# Когда автор написал сообщение, в сравнимом виде: TG хранит ISO-дату, VK — unix-время строкой.
+POSTED_AT_SQL = """CASE WHEN raw_messages.posted_at GLOB '[0-9]*' AND raw_messages.posted_at NOT LIKE '%-%'
+    THEN datetime(raw_messages.posted_at, 'unixepoch') ELSE datetime(raw_messages.posted_at) END"""
+
+
 def list_candidates(
     conn: sqlite3.Connection,
     status: str | None = None,
@@ -262,7 +267,7 @@ def list_candidates(
         FROM catch_candidates
         JOIN raw_messages ON raw_messages.id = catch_candidates.raw_message_id
         {clause}
-        ORDER BY catch_candidates.confidence = 'maybe', catch_candidates.created_at DESC
+        ORDER BY {POSTED_AT_SQL} IS NULL, {POSTED_AT_SQL} DESC, catch_candidates.created_at DESC
         LIMIT ? OFFSET ?
         """,
         [*params, limit, offset],
