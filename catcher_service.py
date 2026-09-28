@@ -12,7 +12,6 @@ from dataclasses import dataclass
 import catcher_db
 import catcher_pipeline
 import db
-import llm
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +58,7 @@ async def run_source(source_id: int) -> SourceRunResult:
         return SourceRunResult(source_id, url, fetched or 0, 0, error=f"разбор: {exc}")
     with db.session() as conn:
         unprocessed = len(catcher_db.unprocessed_messages_for_source(conn, source_id))
-    problem = llm.describe_last_error() if unprocessed else None
+    problem = catcher_pipeline.describe_last_error() if unprocessed else None
     return SourceRunResult(source_id, url, fetched or 0, new_candidates, unprocessed=unprocessed, llm_problem=problem)
 
 

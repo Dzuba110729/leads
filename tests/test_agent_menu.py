@@ -242,7 +242,7 @@ https://t.me/+secret"""
     assert "Добавлено чатов: 3" in agent_menu.describe_added(r)
 
 
-def test_only_high_candidates(tmp_path, monkeypatch):
+def test_maybe_candidates_are_hidden(tmp_path, monkeypatch):
     _db(tmp_path, monkeypatch)
     with db.session() as conn:
         catcher_db.migrate(conn)
@@ -256,15 +256,14 @@ def test_only_high_candidates(tmp_path, monkeypatch):
             catcher_db.add_candidate(conn, raw_message_id=mid, quote=f"цитата {i}", reason="r",
                                      contact_url=None, opener_text="Здравствуйте", confidence=conf)
     _, kb = agent_menu.render_catcher_menu()
-    assert [b.text for b in kb.inline_keyboard[2]] == ["🎯 Только точные (1)", "🆕 Все (3)"]
-    text, kb = agent_menu.render_candidate(0, only_high=True)
-    assert "Точный кандидат 1 из 1" in text and "цитата 1" in text
+    assert [b.text for b in kb.inline_keyboard[2]] == ["🎯 Кандидаты (1)"]
+    text, kb = agent_menu.render_candidate(0)
+    assert "Кандидат 1 из 1" in text and "цитата 1" in text
     done = [b.callback_data for row in kb.inline_keyboard for b in row if (b.callback_data or "").startswith("cat:done:")][0]
-    assert done.endswith(":h")
     with db.session() as conn:
         catcher_db.mark_contacted(conn, int(done.split(":")[2]))
-    text, kb = agent_menu.render_candidate(0, only_high=True)
-    assert "Точных кандидатов не осталось" in text and "Под вопросом ещё 2" in text
+    text, kb = agent_menu.render_candidate(0, only_high=True)  # старая кнопка с :h тоже работает
+    assert "Новых кандидатов нет" in text
 
 
 def test_llm_error_is_explained():
@@ -272,3 +271,21 @@ def test_llm_error_is_explained():
     llm.last_error = "Error code: 400 - Your credit balance is too low to access the Anthropic API."
     assert "закончились деньги" in llm.describe_last_error()
     llm.last_error = None
+
+
+def test_sources_list_is_paginated_for_many_chats(tmp_path, monkeypatch):
+    _db(tmp_path, monkeypatch)
+    with db.session() as conn:
+        catcher_db.migrate(conn)
+        for i in range(101):
+            catcher_db.add_source(conn, "tg", f"https://t.me/very_long_parents_chat_name_{i:03d}")
+    for pick in (False, True):
+        for page in range(7):
+            text, kb = agent_menu.render_sources(pick=pick, page=page)
+            assert len(text) < 4096
+            assert sum(len(row) for row in kb.inline_keyboard) <= 100
+    text, kb = agent_menu.render_sources(pick=False, page=6)
+    assert "101." in text and "всего 101" in text
+    toggle = kb.inline_keyboard[0][0].callback_data
+    assert toggle.startswith("cat:toggle:") and toggle.endswith(":6")  # после паузы — та же страница
+    assert agent_menu._page_from("cat:sources:p:3") == 3 and agent_menu._page_from("cat:pick") == 0

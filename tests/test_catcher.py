@@ -49,7 +49,7 @@ def test_mark_contacted_changes_status():
 
 
 def test_no_llm_gives_no_candidates_and_leaves_batch_unprocessed(monkeypatch):
-    monkeypatch.setattr("llm.available", lambda: False)
+    monkeypatch.setattr("llm.available", lambda: False)  # и API недоступен (claude_code — в conftest)
     messages = [
         {"author": "ivan", "text": "хотим перевести ребёнка на дистант", "url": "https://t.me/g/1"},
         {"author": "petya", "text": "продам коврик в хорошем состоянии", "url": "https://t.me/g/2"},
@@ -72,6 +72,30 @@ def test_process_source_skips_quotes_not_in_batch(monkeypatch):
     created = catcher_pipeline.process_source(conn, source["id"])
     assert created == 0
     assert catcher_db.list_candidates(conn) == []
+
+
+def _run_with_p1_answer(monkeypatch, text: str, answer: dict) -> list:
+    conn = _mem_conn()
+    source = catcher_db.add_source(conn, "tg", "https://t.me/test_group")
+    catcher_db.insert_raw_message(conn, source["id"], "1", "ivan", text, None, None)
+    monkeypatch.setattr(catcher_pipeline, "prefilter", lambda m, r=None: (m, True))
+    monkeypatch.setattr(catcher_pipeline, "run_p1_on_batch", lambda m, r=None: ([{"n": 1, **answer}], True))
+    catcher_pipeline.process_source(conn, source["id"])
+    return conn.execute("SELECT * FROM catch_candidates").fetchall()
+
+
+def test_only_confident_candidates_are_saved(monkeypatch):
+    assert _run_with_p1_answer(monkeypatch, "может школу сменить", {"confidence": "maybe"}) == []
+    assert len(_run_with_p1_answer(monkeypatch, "ищу дистанционную школу", {"confidence": "high"})) == 1
+
+
+def test_ukraine_is_not_a_lead(monkeypatch):
+    # Модель сама пометила семью из Украины.
+    assert _run_with_p1_answer(
+        monkeypatch, "мы из Харькова, ищем школу", {"confidence": "high", "from_ukraine": True}
+    ) == []
+    # Модель флаг забыла, но сообщение по-украински — всё равно отсекаем.
+    assert _run_with_p1_answer(monkeypatch, "шукаємо онлайн-школу для доньки", {"confidence": "high"}) == []
 
 
 def test_candidate_resolved_by_number_not_quote():
@@ -150,11 +174,12 @@ def test_candidate_list_filters_by_status_and_confidence():
     catcher_db.add_candidate(conn, second, "тоже ищу", "r", None, "o", "maybe")
     catcher_db.mark_contacted(conn, catcher_db.list_candidates(conn, confidence="high")[0]["id"])
 
-    assert len(catcher_db.list_candidates(conn, status="new")) == 1
-    assert len(catcher_db.list_candidates(conn, status="new", confidence="maybe")) == 1
+    # «Под вопросом» остаётся в базе, но нигде не показывается и не считается.
+    assert catcher_db.list_candidates(conn, status="new") == []
+    assert catcher_db.list_candidates(conn, status="new", confidence="maybe") == []
     assert len(catcher_db.list_candidates(conn, status="contacted")) == 1
     counts = catcher_db.count_candidates(conn)
-    assert counts["total"] == 2 and counts["new"] == 1 and counts["new_maybe"] == 1
+    assert counts["total"] == 1 and counts["new"] == 0
 
 
 def test_reply_context_lands_in_prompt():
@@ -185,6 +210,39 @@ def test_candidates_sorted_by_message_date_newest_first():
     posted = {"old_tg": "2026-08-01T10:00:00+00:00", "new_vk": "1790000000", "mid_tg": "2026-09-01T10:00:00+00:00", "none": None}
     for i, (author, when) in enumerate(posted.items()):
         row = catcher_db.insert_raw_message(conn, source["id"], str(i), author, "ищу школу", None, when)
-        catcher_db.add_candidate(conn, row, "ищу школу", "r", None, "o", "maybe" if author == "new_vk" else "high")
+        catcher_db.add_candidate(conn, row, "ищу школу", "r", None, "o", "high")
     order = [c["author_name"] for c in catcher_db.list_candidates(conn)]
     assert order == ["new_vk", "mid_tg", "old_tg", "none"]
+
+
+def test_offtopic_tail_is_marked_processed(monkeypatch):
+    """Последняя пачка целиком офтоп (предфильтр оставил 0) — сообщения всё равно разобраны."""
+    conn = _mem_conn()
+    source = catcher_db.add_source(conn, "tg", "https://t.me/test_group")
+    catcher_db.insert_raw_message(conn, source["id"], "1", "a", "всем привет", None, None)
+    monkeypatch.setattr(catcher_pipeline, "prefilter", lambda m, r=None: ([], True))
+    catcher_pipeline.process_source(conn, source["id"])
+    assert catcher_db.unprocessed_messages_for_source(conn, source["id"]) == []
+
+
+def test_catcher_backend_switch(monkeypatch):
+    from config import CONFIG
+    import claude_code
+    import llm
+    calls = []
+    monkeypatch.setattr(claude_code, "call_text", lambda s, u, model="sonnet", **kw: calls.append(("cc", model)) or "[]")
+    monkeypatch.setattr(llm, "call_text", lambda s, u, **kw: calls.append(("api", kw.get("model"))) or "[]")
+    monkeypatch.setattr(CONFIG, "catcher_llm_backend", "claude_code")
+    catcher_pipeline._llm("s", "u", cheap=True)
+    catcher_pipeline._llm("s", "u")
+    monkeypatch.setattr(CONFIG, "catcher_llm_backend", "api")
+    catcher_pipeline._llm("s", "u")
+    assert calls == [("cc", "haiku"), ("cc", "sonnet"), ("api", None)]
+
+
+def test_claude_code_env_has_no_api_keys(monkeypatch):
+    import claude_code
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("LLM_API_KEY", "sk-test")
+    env = claude_code._env()
+    assert "ANTHROPIC_API_KEY" not in env and "LLM_API_KEY" not in env

@@ -117,7 +117,7 @@ async def advance_and_notify(order_id: int) -> str:
         new_status = db.advance_status(conn, order_id)
         lead = conn.execute("SELECT * FROM leads WHERE id = ?", (order["lead_id"],)).fetchone()
 
-    if lead is not None and CONFIG.bot_token:
+    if lead is not None and CONFIG.cashier_bot_active:
         bot = build_bot()
         try:
             await notify_status_change(

@@ -364,79 +364,101 @@ def render_catcher_menu() -> tuple[str, InlineKeyboardMarkup]:
         "<b>🎣 Ловец лидов</b>\n\n"
         f"Подключено чатов: {len(sources)}\n"
         f"Кандидатов, кому ещё не писали: {counts['new']}"
-        + (f" (из них под вопросом: {counts['new_maybe']})" if counts["new_maybe"] else "")
         + "\n\nДобавить чат или поставить на паузу — кнопка «📚 Чаты»."
     )
     kb = _kb(
         [_btn("📄 Обойти и прислать документ", "cat:rundoc")],
         [_btn("▶️ Обойти все чаты", "cat:runall"), _btn("🎯 Обойти один", "cat:pick")],
-        [_btn(f"🎯 Только точные ({counts['new_high']})", "cat:cand:0:h"),
-         _btn(f"🆕 Все ({counts['new']})", "cat:cand:0")],
+        [_btn(f"🎯 Кандидаты ({counts['new']})", "cat:cand:0")],
         [_btn("📄 Собрать документ", "cat:doc"), _btn("📚 Чаты", "cat:sources")],
     )
     return text, kb
 
 
-def render_sources(pick: bool) -> tuple[str, InlineKeyboardMarkup]:
+# Чатов бывает сотня: всё сразу не влезает ни в сообщение (4096 символов), ни в клавиатуру (100 кнопок).
+SOURCES_PAGE_SIZE = 15
+
+
+def _page_nav(prefix: str, page: int, pages: int) -> list:
+    nav = []
+    if page > 0:
+        nav.append(_btn("⏮ Назад", f"{prefix}:p:{page - 1}"))
+    if pages > 1:
+        nav.append(_btn(f"{page + 1} / {pages}", f"{prefix}:p:{page}"))
+    if page < pages - 1:
+        nav.append(_btn("Дальше ⏭", f"{prefix}:p:{page + 1}"))
+    return nav
+
+
+def render_sources(pick: bool, page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
     with db.session() as conn:
         catcher_db.migrate(conn)
         sources = catcher_db.list_sources(conn)
+        if pick:
+            sources = [s for s in sources if s["enabled"]]
         stats = {s["id"]: catcher_db.source_stats(conn, s["id"]) for s in sources}
     if not sources:
         return (
             "Чатов пока нет. Нажмите «➕ Добавить чат» и пришлите ссылку на открытую группу.",
             _kb([_btn("➕ Добавить чат", "cat:add")], [_btn("« Ловец", "menu:catcher")]),
         )
+    pages = (len(sources) + SOURCES_PAGE_SIZE - 1) // SOURCES_PAGE_SIZE
+    page = max(0, min(page, pages - 1))
+    first = page * SOURCES_PAGE_SIZE
+    chunk = list(enumerate(sources, 1))[first:first + SOURCES_PAGE_SIZE]
     if pick:
         rows = [
-            [_btn(f"{'TG' if s['platform'] == 'tg' else 'VK'} · {s['url'].replace('https://', '')[:40]}", f"cat:run:{s['id']}")]
-            for s in sources if s["enabled"]
+            [_btn(f"{n}. {'TG' if s['platform'] == 'tg' else 'VK'} · {s['url'].replace('https://', '')[:40]}", f"cat:run:{s['id']}")]
+            for n, s in chunk
         ]
+        nav = _page_nav("cat:pick", page, pages)
+        if nav:
+            rows.append(nav)
         rows.append([_btn("« Ловец", "menu:catcher")])
-        return "<b>🎯 Какой чат обойти?</b>", InlineKeyboardMarkup(inline_keyboard=rows)
-    lines = ["<b>📚 Подключённые чаты</b>\n"]
+        return f"<b>🎯 Какой чат обойти?</b> (всего {len(sources)})", InlineKeyboardMarkup(inline_keyboard=rows)
+    enabled = sum(1 for s in sources if s["enabled"])
+    lines = [f"<b>📚 Подключённые чаты</b> — всего {len(sources)}, включено {enabled}\n"]
     rows = []
-    for n, s in enumerate(sources, 1):
+    for n, s in chunk:
         st = stats[s["id"]]
-        state = "✅" if s["enabled"] else "⏸ на паузе"
+        state = "✅" if s["enabled"] else "⏸"
         lines.append(
-            f"{n}. {state} {_e(s['url'])}\n    сообщений: {st['total'] or 0}, проверен: {_fmt_dt(s['last_checked_at'])}"
+            f"{n}. {state} {_e(s['url'])}\n"
+            f"    сообщений: {st['total'] or 0}, проверен: {_fmt_dt(s['last_checked_at'])}"
         )
         rows.append([_btn(
-            f"{n}. {'⏸ Поставить на паузу' if s['enabled'] else '▶️ Включить'}",
-            f"cat:toggle:{s['id']}",
+            f"{n}. {'⏸ На паузу' if s['enabled'] else '▶️ Включить'}",
+            f"cat:toggle:{s['id']}:{page}",
         )])
+    nav = _page_nav("cat:sources", page, pages)
+    if nav:
+        rows.append(nav)
     rows.append([_btn("➕ Добавить чат", "cat:add")])
     rows.append([_btn("« Ловец", "menu:catcher")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def render_candidate(offset: int, note: str = "", only_high: bool = False) -> tuple[str, InlineKeyboardMarkup]:
-    """Карточка одного нового кандидата. only_high — листать только точных (без «под вопросом»)."""
+    """Карточка одного нового кандидата. Показываются только точные (см. catcher_db.VISIBLE_SQL);
+    only_high оставлен ради старых кнопок с суффиксом :h в уже отправленных сообщениях."""
     mode = ":h" if only_high else ""
     with db.session() as conn:
         catcher_db.migrate(conn)
         counts = catcher_db.count_candidates(conn)
-        total = counts["new_high"] if only_high else counts["new"]
+        total = counts["new"]
         offset = max(0, min(offset, max(total - 1, 0)))
         rows = catcher_db.list_candidates(
-            conn, status="new", confidence="high" if only_high else None, limit=1, offset=offset
+            conn, status="new", limit=1, offset=offset
         )
     if not rows:
-        if only_high and counts["new"]:
-            empty = f"Точных кандидатов не осталось. Под вопросом ещё {counts['new_maybe']} — их можно посмотреть во всех."
-            kb = _kb([_btn(f"🆕 Все кандидаты ({counts['new']})", "cat:cand:0")], [_btn("« Ловец", "menu:catcher")])
-        else:
-            empty = "Новых кандидатов нет — все разобраны. Запустите обход чатов, чтобы найти ещё."
-            kb = _kb([_btn("▶️ Обойти все чаты", "cat:runall")], [_btn("« Ловец", "menu:catcher")])
+        empty = "Новых кандидатов нет — все разобраны. Запустите обход чатов, чтобы найти ещё."
+        kb = _kb([_btn("▶️ Обойти все чаты", "cat:runall")], [_btn("« Ловец", "menu:catcher")])
         return (note + "\n\n" if note else "") + empty, kb
     c = rows[0]
     author = f"@{c['author_username']}" if c["author_username"] else (c["author_name"] or "автор неизвестен")
-    maybe = " · <i>под вопросом</i>" if c["confidence"] == "maybe" else ""
-    title = "Точный кандидат" if only_high else "Кандидат"
     text = (
         (note + "\n\n" if note else "")
-        + f"<b>{title} {offset + 1} из {total}</b>{maybe}\n"
+        + f"<b>Кандидат {offset + 1} из {total}</b>\n"
         f"<b>{_e(author)}</b>\n\n"
         f"<b>Когда написал:</b> {_fmt_posted(c['posted_at'])}\n"
         f"<b>Что написал:</b> «{_e(c['quote'])}»\n\n"
@@ -798,16 +820,22 @@ async def cb_manual(cb: CallbackQuery) -> None:
     await _show(cb, render_lead_card(int(lead_id), note=note))
 
 
-@router.callback_query(F.data == "cat:pick")
+def _page_from(data: str) -> int:
+    """cat:sources / cat:sources:p:2 → номер страницы."""
+    parts = data.split(":")
+    return int(parts[3]) if len(parts) == 4 and parts[2] == "p" and parts[3].isdigit() else 0
+
+
+@router.callback_query(F.data.startswith("cat:pick"))
 async def cb_cat_pick(cb: CallbackQuery) -> None:
     if await _guard(cb):
-        await _show(cb, render_sources(pick=True))
+        await _show(cb, render_sources(pick=True, page=_page_from(cb.data)))
 
 
-@router.callback_query(F.data == "cat:sources")
+@router.callback_query(F.data.startswith("cat:sources"))
 async def cb_cat_sources(cb: CallbackQuery) -> None:
     if await _guard(cb):
-        await _show(cb, render_sources(pick=False))
+        await _show(cb, render_sources(pick=False, page=_page_from(cb.data)))
 
 
 @router.callback_query(F.data == "cat:add")
@@ -855,12 +883,14 @@ async def on_source_link(message: Message) -> None:
 async def cb_cat_toggle(cb: CallbackQuery) -> None:
     if not await _guard(cb):
         return
-    source_id = int(cb.data.rsplit(":", 1)[1])
+    parts = cb.data.split(":")  # cat:toggle:<id>[:<страница>]
+    source_id = int(parts[2])
+    page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
     with db.session() as conn:
         source = catcher_db.get_source(conn, source_id)
         if source is not None:
             catcher_db.set_source_enabled(conn, source_id, not source["enabled"])
-    await _show(cb, render_sources(pick=False))
+    await _show(cb, render_sources(pick=False, page=page))
 
 
 @router.callback_query(F.data.in_({"cat:runall", "cat:rundoc"}))

@@ -22,6 +22,7 @@ import json
 import logging
 
 import catcher_db
+import claude_code
 import llm
 from config import CONFIG
 
@@ -37,6 +38,8 @@ ICP_OG1 = """\
 НЕ наш клиент: дети до 8 лет и 1-2 класс, дошкольники, детский сад, подготовка к школе,
 развивашки/кружки для малышей; выпускники после 11 класса, студенты, колледж/вуз, взрослые.
 Если возраст или класс в тексте не назван - это не повод исключать, оценивай по остальному.
+НЕ наш клиент: семьи из Украины - живут в Украине, уехали из Украины (беженцы, временная защита),
+ищут украинскую школу/программу или аттестат Украины, пишут по-украински.
 Боль: травля/буллинг в очной школе, неудобный график (спорт/переезд), желание перейти на
 семейное обучение или сдать аттестацию экстерном, эмиграция/переезд семьи.
 Слова-маркеры: "перевести ребёнка", "ищу дистанционную школу", "как оформить семейное обучение",
@@ -109,7 +112,9 @@ P1_SYSTEM_PROMPT = """\
 - оффтоп и всё, что попадает под стоп-слова;
 - сообщения не по моему продукту (даже если тема смежная);
 - тех, чей ребёнок явно не подходит по возрасту/классу (см. ICP): младше 8 лет, 1-2 класс,
-  детсад, или уже закончил школу. Если в семье несколько детей - подходит, если хотя бы один 8-18 лет.
+  детсад, или уже закончил школу. Если в семье несколько детей - подходит, если хотя бы один 8-18 лет;
+- семьи из Украины (см. ICP). Если по тексту видно, что человек из Украины, но ты всё же его
+  вернул, - обязательно поставь "from_ukraine": true.
 
 ПРАВИЛА:
 - Опирайся ТОЛЬКО на то, что реально есть в тексте. Ничего не додумывай.
@@ -124,15 +129,29 @@ P1_SYSTEM_PROMPT = """\
 УВЕРЕННОСТЬ (поле confidence):
 - "high" - человек прямо ищет, спрашивает или описывает свою боль по теме продукта;
 - "maybe" - похоже на нашего клиента, но по тексту нельзя утверждать уверенно.
-Лучше пометить "maybe", чем промолчать.
+В список лидов попадают только "high" - "maybe" отбрасывается, поэтому не завышай уверенность.
 
 ЗАГОТОВКА ВХОДА (поле opener_text):
 {opener_style}
 
 Ответь СТРОГО в формате JSON-массива (без пояснений вокруг), один элемент = один подходящий
 человек, если подходящих нет - верни пустой массив []:
-[{{"n": <номер сообщения>, "quote": "<цитата>", "reason": "<повод>", "confidence": "high|maybe", "contact_url": "<ссылка или null>", "opener_text": "<заготовка входа>"}}]
+[{{"n": <номер сообщения>, "quote": "<цитата>", "reason": "<повод>", "confidence": "high|maybe", "from_ukraine": false, "contact_url": "<ссылка или null>", "opener_text": "<заготовка входа>"}}]
 """
+
+
+def _llm(system_prompt: str, user_message: str, cheap: bool = False, max_tokens: int = 8192) -> str | None:
+    """Вызов модели для ловца: по подписке через Claude Code или через API (CATCHER_LLM_BACKEND)."""
+    if CONFIG.catcher_llm_backend == "claude_code":
+        return claude_code.call_text(system_prompt, user_message, model="haiku" if cheap else "sonnet")
+    model = CONFIG.llm_model_cheap if cheap else None
+    return llm.call_text(system_prompt, user_message, max_tokens=max_tokens, model=model)
+
+
+def describe_last_error() -> str | None:
+    if CONFIG.catcher_llm_backend == "claude_code":
+        return claude_code.describe_last_error()
+    return llm.describe_last_error()
 
 
 def _col(row, name, default=None):
@@ -179,9 +198,7 @@ def prefilter(messages: list, reply_map: dict | None = None) -> tuple[list, bool
         return messages, False
 
     system_prompt = PREFILTER_SYSTEM_PROMPT.format(icp=ICP_OG1)
-    raw = llm.call_text(
-        system_prompt, _format_batch(messages, reply_map), max_tokens=2048, model=CONFIG.llm_model_cheap
-    )
+    raw = _llm(system_prompt, _format_batch(messages, reply_map), cheap=True, max_tokens=2048)
     if not raw:
         return messages, False
     try:
@@ -206,7 +223,7 @@ def run_p1_on_batch(messages: list, reply_map: dict | None = None) -> tuple[list
         return [], True
 
     system_prompt = P1_SYSTEM_PROMPT.format(icp=ICP_OG1, opener_style=OPENER_STYLE)
-    result = llm.call_text(system_prompt, _format_batch(messages, reply_map), max_tokens=8192)
+    result = _llm(system_prompt, _format_batch(messages, reply_map))
     if result:
         try:
             candidates = json.loads(_extract_json(result))
@@ -238,6 +255,18 @@ def _find_matching_message_id(quote: str, messages: list) -> int | None:
         if ratio > best_ratio:
             best_id, best_ratio = m["id"], ratio
     return best_id if best_ratio >= 0.6 else None
+
+
+# Буквы, которых нет в русском и белорусском, — сообщение написано по-украински.
+UKRAINIAN_LETTERS = set("їЇєЄґҐ")
+
+
+def is_from_ukraine(candidate: dict, message_text: str) -> bool:
+    """Семьи из Украины — не наш клиент. Флаг модели + жёсткая проверка текста, чтобы
+    украиноязычное сообщение не прошло, даже если модель флаг забыла."""
+    if candidate.get("from_ukraine") is True:
+        return True
+    return any(ch in UKRAINIAN_LETTERS for ch in message_text or "")
 
 
 def resolve_message_id(candidate: dict, chunk: list) -> int | None:
@@ -304,8 +333,14 @@ def process_source(conn, source_chat_id: int) -> int:
                 if previous is None or (previous.get("confidence") != "high" and c.get("confidence") == "high"):
                     found[message_id] = c
 
+        texts = {m["id"]: _col(m, "text", "") for m in shortlist}
         for message_id, c in found.items():
-            confidence = "high" if c.get("confidence") == "high" else "maybe"
+            # В лиды идут только точные: «под вопросом» засоряли список (решение 2026-09-28).
+            if c.get("confidence") != "high":
+                continue
+            if is_from_ukraine(c, texts.get(message_id, "")):
+                continue
+            confidence = "high"
             if catcher_db.add_candidate(
                 conn,
                 raw_message_id=message_id,
@@ -320,6 +355,13 @@ def process_source(conn, source_chat_id: int) -> int:
         if any_pass_ok:
             analyzed |= shortlist_ids
 
+        # Фиксируем после каждой пачки: разбор большого чата идёт минутами, и всё это время
+        # открытая транзакция держала бы базу — продающий бот падал с «database is locked».
+        # Заодно прерванный прогон не теряет уже разобранное.
+        catcher_db.mark_messages_processed(conn, sorted(analyzed))
+        conn.commit()
+
+    # Пачки, где предфильтр отбросил всё (continue выше), до коммита в цикле не доходят.
     catcher_db.mark_messages_processed(conn, sorted(analyzed))
     skipped = len(messages) - len(analyzed)
     if skipped:

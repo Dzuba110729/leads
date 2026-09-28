@@ -33,12 +33,23 @@ class Config:
     # Бот (хэндофф к менеджеру — см. og1/PLAN.md п.4: оплата не разовая, бот доводит до передачи)
     bot_token: str = os.getenv("BOT_TOKEN", "")
     bot_username: str = os.getenv("BOT_USERNAME", "og1_priemnaya_bot")
+    # Бот-кассир выключен (2026-09-28): горячего лида доводит до звонка специалиста сам продавец,
+    # ссылку на бота лиду не шлём, статусы заявки ему не рассылаем. Токен оставлен — включить: 1.
+    cashier_bot_enabled: bool = os.getenv("CASHIER_BOT_ENABLED", "0") == "1"
+
+    @property
+    def cashier_bot_active(self) -> bool:
+        return self.cashier_bot_enabled and bool(self.bot_token)
 
     # LLM
     llm_api_key: str = os.getenv("ANTHROPIC_API_KEY", os.getenv("LLM_API_KEY", ""))
     llm_model: str = os.getenv("LLM_MODEL", "claude-sonnet-5")
     # Дешёвая модель для предфильтра сборщика: отсеивает явный мусор до дорогого разбора
     llm_model_cheap: str = os.getenv("LLM_MODEL_CHEAP", "claude-haiku-4-5-20251001")
+    # Чем ловец разбирает чаты: claude_code — Claude Code CLI по подписке владельца (claude_code.py),
+    # api — через ANTHROPIC_API_KEY, как продающий бот.
+    catcher_llm_backend: str = os.getenv("CATCHER_LLM_BACKEND", "claude_code")
+    claude_bin: str = os.getenv("CLAUDE_BIN", "")
     llm_base_url: str = os.getenv("LLM_BASE_URL", "")
 
     # Хранение
@@ -146,6 +157,18 @@ class Config:
     agent_bot_token: str = os.getenv("AGENT_BOT_TOKEN", "")
     agent_allowed_ids: list[int] = field(
         default_factory=lambda: [int(x) for x in _list("AGENT_ALLOWED_IDS", "") if x.isdigit()]
+    )
+    # Megabitra (AlterCPA): готовый лид с телефоном отправляется в поток (megabitra.py).
+    megabitra_api_key: str = os.getenv("MEGABITRA_API_KEY", "")
+    megabitra_offer: str = os.getenv("MEGABITRA_OFFER", "")
+    megabitra_flow: str = os.getenv("MEGABITRA_FLOW", "")
+    megabitra_lead_ip: str = os.getenv("MEGABITRA_LEAD_IP", "")
+    megabitra_country: str = os.getenv("MEGABITRA_COUNTRY", "")
+    # Лид без телефона (выбрал тг/почту): API требует phone — ставим заглушку, способ связи в комментарии.
+    megabitra_no_phone: str = os.getenv("MEGABITRA_NO_PHONE", "")
+    # Кому бот @BOT_USERNAME шлёт карточки лидов, готовых к связи. По умолчанию — операторы ТГ-агента.
+    ready_leads_chat_ids: list[int] = field(
+        default_factory=lambda: [int(x) for x in _list("READY_LEADS_CHAT_IDS", os.getenv("AGENT_ALLOWED_IDS", "")) if x.isdigit()]
     )
     agent_model: str = os.getenv("AGENT_MODEL", "claude-sonnet-5")
     # Модель faster-whisper для расшифровки голосовых лидов (локально, аудио никуда не уходит)

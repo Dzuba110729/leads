@@ -109,6 +109,16 @@ def set_source_enabled(conn: sqlite3.Connection, source_id: int, enabled: bool) 
     conn.execute("UPDATE source_chats SET enabled = ? WHERE id = ?", (int(enabled), source_id))
 
 
+def delete_source(conn: sqlite3.Connection, source_id: int) -> None:
+    """Удаляет чат вместе с выгруженными сообщениями и найденными в нём кандидатами."""
+    conn.execute(
+        "DELETE FROM catch_candidates WHERE raw_message_id IN (SELECT id FROM raw_messages WHERE source_chat_id = ?)",
+        (source_id,),
+    )
+    conn.execute("DELETE FROM raw_messages WHERE source_chat_id = ?", (source_id,))
+    conn.execute("DELETE FROM source_chats WHERE id = ?", (source_id,))
+
+
 def update_cursor(conn: sqlite3.Connection, source_id: int, last_message_id: str) -> None:
     conn.execute(
         "UPDATE source_chats SET last_message_id = ?, last_checked_at = ? WHERE id = ?",
@@ -235,6 +245,9 @@ def add_candidate(
 
 CANDIDATES_PAGE_SIZE = 50
 
+# Показываем только точных кандидатов. Старые «под вопросом» остаются в базе, но нигде не видны.
+VISIBLE_SQL = "catch_candidates.confidence = 'high'"
+
 
 # Когда автор написал сообщение, в сравнимом виде: TG хранит ISO-дату, VK — unix-время строкой.
 POSTED_AT_SQL = """CASE WHEN raw_messages.posted_at GLOB '[0-9]*' AND raw_messages.posted_at NOT LIKE '%-%'
@@ -248,7 +261,7 @@ def list_candidates(
     limit: int = CANDIDATES_PAGE_SIZE,
     offset: int = 0,
 ) -> list[sqlite3.Row]:
-    where, params = [], []
+    where, params = [VISIBLE_SQL], []
     if status:
         where.append("catch_candidates.status = ?")
         params.append(status)
@@ -282,7 +295,7 @@ def list_candidates_for_export(
     limit: int = 500,
 ) -> list[sqlite3.Row]:
     """Кандидаты с чатом-источником и датой сообщения — для отчёта агента."""
-    where, params = [], []
+    where, params = [VISIBLE_SQL], []
     if status:
         where.append("catch_candidates.status = ?")
         params.append(status)
@@ -323,6 +336,7 @@ def count_candidates(conn: sqlite3.Connection) -> dict[str, int]:
                SUM(CASE WHEN status = 'new' AND confidence = 'high' THEN 1 ELSE 0 END) AS new_high,
                SUM(CASE WHEN status = 'new' AND confidence = 'maybe' THEN 1 ELSE 0 END) AS new_maybe
         FROM catch_candidates
+        WHERE confidence = 'high'
         """
     ).fetchone()
     return {k: (row[k] or 0) for k in ("total", "new", "new_high", "new_maybe")}

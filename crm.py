@@ -249,7 +249,6 @@ def _source_dict(conn, s) -> dict:
 # при повторном обходе через пару дней старые обработанные не должны мешаться под ногами.
 CANDIDATE_VIEWS = {
     "new": {"status": "new", "confidence": None, "label": "Новые"},
-    "maybe": {"status": "new", "confidence": "maybe", "label": "Под вопросом"},
     "contacted": {"status": "contacted", "confidence": None, "label": "Уже написал"},
     "all": {"status": None, "confidence": None, "label": "Все"},
 }

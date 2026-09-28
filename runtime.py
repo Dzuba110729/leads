@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 started_at = datetime.now(timezone.utc)
 userbot = None  # telethon.TelegramClient продающего аккаунта или None
 cashier_bot_enabled = False
+ready_bot = None  # aiogram.Bot ленты готовых лидов (@BOT_USERNAME) или None
 
 # Сообщения, которые продающий аккаунт отправил сам (ответ ИИ, прогрев, напоминание): (chat_id, msg_id).
 # По ним обработчик исходящих отличает автоответ от сообщения, которое менеджер написал вручную.

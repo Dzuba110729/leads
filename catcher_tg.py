@@ -94,6 +94,10 @@ async def fetch_new_messages(conn, source) -> int:
             )
             if row_id is not None:
                 fetched += 1
+                # get_sender ходит в сеть: без промежуточных коммитов выгрузка большого чата
+                # держит базу минутами и мешает продающему боту.
+                if fetched % 100 == 0:
+                    conn.commit()
 
         if max_seen_id != offset_id:
             catcher_db.update_cursor(conn, source["id"], str(max_seen_id))

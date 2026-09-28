@@ -52,6 +52,8 @@ async def handle_incoming(event, source: str) -> None:
     who = f"@{username}" if username else f"ID {tg_id}"
     with db.session() as conn:
         lead = db.get_or_create_lead(conn, tg_id, username, source=source)
+        if source == "dm":
+            db.set_lead_name(conn, lead["id"], db.display_name(sender))
         if lead["blocked"]:
             return
         if not db.claim_incoming_message(conn, lead["id"], event.id):
@@ -94,6 +96,10 @@ async def handle_incoming(event, source: str) -> None:
         else:
             answer = "Пока не вижу активных заявок по вашему аккаунту. Если уже подавали заявку - уточните у менеджера."
         await _reply(event, answer, lead_id=lead["id"])
+        return
+
+    # Шаг 4 (og1): бот попросил номер и время для звонка — лид прислал номер.
+    if await _take_contact_if_awaited(event, lead, text, who):
         return
 
     if guard_outage:
@@ -227,13 +233,71 @@ async def handle_outgoing(event, catch_up: bool = False) -> None:
         return
     with db.session() as conn:
         lead = db.ensure_lead(conn, chat.id, getattr(chat, "username", None))
+        db.set_lead_name(conn, lead["id"], db.display_name(chat))
         if catch_up and text in (lead["dialog_context"] or ""):
             return
         db.append_dialog_context(conn, lead["id"], "менеджер", text)
     logger.info("MANAGER lead=%s: сообщение менеджера записано в диалог", chat.id)
 
 
+async def _take_contact_if_awaited(event, lead, text: str, who: str) -> bool:
+    """Лид ответил на «когда и где удобно связаться»: сохраняем в заявку, зовём менеджера, бот
+    замолкает. Не похоже на такой ответ — False: сообщение идёт обычным путём (лид мог задать вопрос)."""
+    with db.session() as conn:
+        order = db.order_awaiting_contact(conn, lead["id"])
+    if order is None:
+        return False
+    # История без только что записанной реплики лида — чтобы понять, о чём бот уже спрашивал.
+    history = (lead["dialog_context"] or "")
+    step = pipeline.contact_step(text, history)
+    if step is None:
+        return False
+    follow_up = {
+        "ask_phone": pipeline.PHONE_NUMBER_REQUEST_TEXT,
+        "offer_alternatives": pipeline.ALTERNATIVES_TEXT,
+        "ask_email": pipeline.EMAIL_REQUEST_TEXT,
+    }.get(step)
+    if follow_up:
+        await _reply(event, follow_up, lead_id=lead["id"])
+        return True
+    with db.session() as conn:
+        db.set_order_contact(conn, order["id"], text)
+        # Дальше разговор ведёт менеджер: бот не отвечает и не прогревает (как «Веду сам»).
+        db.set_manual_mode(conn, lead["id"], True)
+    logger.info("CONTACT lead=%s order=%s: контакт/время для связи получены", lead["tg_id"], order["id"])
+    await _reply(event, pipeline.CONTACT_THANKS_TEXT, lead_id=lead["id"])
+    # Карточка с перепиской — в ленту готовых лидов (@BOT_USERNAME). Не дошла (бот не настроен
+    # или у него не нажали /start) — хотя бы коротко через ТГ-агента, чтобы лид не потерялся.
+    import megabitra
+    import ready_bot
+
+    # Сначала в Megabitra — чтобы результат сразу был в карточке. Сбой там карточку не отменяет.
+    if megabitra.enabled():
+        with db.session() as conn:
+            fresh_order, fresh_lead = db.get_order(conn, order["id"]), db.get_lead(conn, lead["id"])
+        result = await megabitra.push_lead(fresh_order, fresh_lead)
+        with db.session() as conn:
+            db.set_megabitra_result(conn, order["id"], result.get("id") if result.get("status") == "ok" else None,
+                                    megabitra.describe(result))
+
+    if await ready_bot.send_ready_card(order["id"]) == 0:
+        await alerts.notify_operators(
+            f"📞 {who} ответил(а), когда и где удобно связаться — заявка №{order['id']} ({order['tariff']}).\n\n"
+            f"«{text}»\n\n"
+            "Бот этому лиду больше не отвечает — свяжитесь и ведите диалог сами.\n"
+            f"Карточка в @{CONFIG.bot_username} не дошла — нажмите там /start."
+        )
+    return True
+
+
 async def _escalate(event, lead, dialog_text: str, score_result: pipeline.ScoreResult, who: str = "") -> None:
+    # Уже просили номер по открытой заявке — не плодим вторую, просто напоминаем.
+    with db.session() as conn:
+        pending = db.order_awaiting_contact(conn, lead["id"])
+    if pending is not None:
+        await _reply(event, pipeline.CALL_REQUEST_AGAIN_TEXT, lead_id=lead["id"])
+        return
+
     extracted, failed = await asyncio.to_thread(alerts.run_llm_step, pipeline.extract_order, dialog_text)
     if failed:  # без ИИ заявка собралась бы из догадок — ждём, пока ИИ заработает
         await alerts.report_llm_outage(who or f"ID {lead['tg_id']}")
@@ -251,8 +315,13 @@ async def _escalate(event, lead, dialog_text: str, score_result: pipeline.ScoreR
         db.create_handoff(conn, order["id"], lead["id"], score_result.score, extracted.summary)
 
     logger.info("ESCALATE lead=%s order=%s tariff=%s", lead["tg_id"], order["id"], extracted.tariff_name)
-    link = bot_module.deep_link_for_order(order["id"])
-    await _reply(event, f"Похоже, вы готовы двигаться дальше! Продолжим здесь: [бот-менеджер]({link})", lead_id=lead["id"])
+    # Для og1 сделку закрывает человек (договор, документы — og1/PLAN.md п.4), поэтому вместо
+    # ссылки на бота-кассира просим номер и время для звонка менеджера.
+    await _reply(event, pipeline.CALL_REQUEST_TEXT, lead_id=lead["id"])
+    await alerts.notify_operators(
+        f"🔥 Горячий лид {who or lead['tg_id']} (балл {score_result.score}) — заявка №{order['id']}: "
+        f"{extracted.summary}\n\nБот спросил, когда и где удобно связаться, — пришлю ответ."
+    )
 
 
 async def _reply(event, text: str, lead_id: int | None = None) -> None:
@@ -324,6 +393,9 @@ async def daily_warmup_task(userbot, check_every_seconds: int = 300) -> None:
 
 
 USERBOT_ALIVE_KEY = "userbot_alive_at"
+# start() может зависнуть навсегда (например, после обрыва сети или сдвига часов) — тогда
+# процесс жив, но ничего не делает, и launchd его не перезапускает. Падаем по таймауту.
+USERBOT_START_TIMEOUT = 120
 HEARTBEAT_SECONDS = 60
 CATCH_UP_MAX = timedelta(days=2)
 
@@ -381,11 +453,28 @@ def build_userbot() -> TelegramClient | None:
     return TelegramClient("og1_userbot", CONFIG.tg_api_id, CONFIG.tg_api_hash)
 
 
+async def backfill_lead_names(userbot) -> None:
+    """Имена лидам, заведённым до появления поля name (для карточек готовых лидов)."""
+    with db.session() as conn:
+        leads = db.leads_without_name(conn)
+    filled = 0
+    for lead in leads:
+        try:
+            entity = await userbot.get_entity(lead["tg_id"])
+        except Exception:
+            continue  # нет в кэше аккаунта — имя подтянется со следующим сообщением
+        with db.session() as conn:
+            db.set_lead_name(conn, lead["id"], db.display_name(entity))
+        filled += 1
+    if leads:
+        logger.info("имена лидов: заполнено %s из %s", filled, len(leads))
+
+
 async def main() -> None:
     with db.session():
         pass  # прогреть/создать схему на старте
 
-    cashier_bot = bot_module.build_bot() if CONFIG.bot_token else None
+    cashier_bot = bot_module.build_bot() if CONFIG.cashier_bot_active else None
     userbot = build_userbot()
 
     tasks = [daily_warmup_task(userbot), reminders.run_forever(cashier_bot, userbot)]
@@ -404,22 +493,37 @@ async def main() -> None:
         async def _on_group(event):
             await handle_incoming(event, source="group")
 
-        await userbot.start(phone=CONFIG.tg_phone or None)
+        try:
+            await asyncio.wait_for(userbot.start(phone=CONFIG.tg_phone or None), USERBOT_START_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.error("userbot не подключился за %s с — выходим, launchd перезапустит", USERBOT_START_TIMEOUT)
+            raise SystemExit(1)
         runtime.userbot = userbot
         with db.session() as conn:
             alive_at = db.get_meta(conn, USERBOT_ALIVE_KEY)
         tasks.append(catch_up_missed(userbot, alive_at))
+        tasks.append(backfill_lead_names(userbot))
         tasks.append(userbot_heartbeat())
         tasks.append(userbot.run_until_disconnected())
     else:
         logger.warning("TG_API_ID/TG_API_HASH не заданы — userbot не запущен")
 
-    if cashier_bot is not None:
-        from bot import router_dp
-        runtime.cashier_bot_enabled = True
-        tasks.append(router_dp.start_polling(cashier_bot))
+    # @BOT_USERNAME: лента готовых лидов (+ старый бот-кассир, если его включили обратно).
+    if CONFIG.bot_token:
+        import ready_bot
+        from aiogram import Dispatcher
+
+        feed_bot = cashier_bot or bot_module.build_bot()
+        runtime.ready_bot = feed_bot
+        if cashier_bot is not None:
+            from bot import router_dp as feed_dp
+            runtime.cashier_bot_enabled = True
+        else:
+            feed_dp = Dispatcher()
+        feed_dp.include_router(ready_bot.router)
+        tasks.append(feed_dp.start_polling(feed_bot))
     else:
-        logger.warning("BOT_TOKEN не задан — бот-хэндофф не запущен")
+        logger.warning("BOT_TOKEN не задан — лента готовых лидов не запущена")
 
     if CONFIG.agent_bot_token:
         import agent_bot

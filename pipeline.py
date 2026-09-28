@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 
 import catalog
@@ -17,6 +19,7 @@ from prompts import (
     ORIENTIR_TEMPLATE,
     SCORING_SYSTEM_PROMPT,
     STATUS_ANSWER_TEMPLATE,
+    MANAGER_STYLE_OG1,
     TEMPLATE_A_OG1,
     WARMUP_STEP_TEXTS_OG1,
 )
@@ -46,6 +49,95 @@ def band_for_score(score: int) -> str:
         if low <= score <= high:
             return band
     return "cold"
+
+
+# Номер телефона в свободном тексте: +7 (999) 123-45-67, 89991234567, +995 555 12 34 56 и т.п.
+PHONE_RE = re.compile(r"\+?\d[\d\s()\-]{8,}\d")
+
+
+def extract_phone(text: str) -> str | None:
+    """Первый похожий на телефон фрагмент (10-15 цифр) или None. Даты и время сюда не попадают:
+    в них меньше 10 цифр."""
+    for match in PHONE_RE.finditer(text or ""):
+        digits = re.sub(r"\D", "", match.group())
+        if 10 <= len(digits) <= 15:
+            return match.group().strip()
+    return None
+
+
+# Тексты в стиле менеджера (prompts.MANAGER_STYLE_OG1): коротко, «Вы» с большой буквы.
+# Сначала просим телефон; не хочет звонок — предлагаем тг или почту (решение менеджера 2026-09-28).
+CALL_REQUEST_TEXT = (
+    "Отлично! Подскажите, пожалуйста, номер телефона и в какое время Вам удобно, "
+    "чтобы специалист позвонил и обсудил всё более детально."
+)
+CALL_REQUEST_AGAIN_TEXT = "Подскажите, пожалуйста, номер телефона и удобное время, чтобы специалист с Вами связался."
+PHONE_NUMBER_REQUEST_TEXT = "Хорошо, напишите, пожалуйста, номер телефона, по которому Вам удобно позвонить."
+ALTERNATIVES_TEXT = "Хорошо, тогда можно связаться здесь, в тг, или по почте - как Вам удобнее?"
+EMAIL_REQUEST_TEXT = "Хорошо, напишите, пожалуйста, адрес почты."
+CONTACT_THANKS_TEXT = "Хорошо, передаю Ваши контакты специалисту по данному направлению, он с Вами свяжется."
+
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+PHONE_REFUSAL_MARKERS = (
+    "не звон", "без звон", "не хочу по телефон", "не по телефон", "не удобно говорить",
+    "неудобно говорить", "не могу говорить", "не хочу давать", "не дам номер", "без номер",
+    "не люблю звон", "лучше не звон", "лучше напиш", "лучше перепис", "только перепис",
+)
+
+# Мессенджеры и почта: способ связи без номера телефона.
+_MESSENGER_MARKERS = ("телеграм", "telegram", "тг", "здесь", "сюда", "ватсап", "вотсап", "вацап",
+                      "whatsapp", "вайбер", "viber", "max", "почт", "email", "e-mail")
+
+# Ответ на «когда и где удобно связаться» без номера: канал связи или время.
+CONTACT_MARKERS = (
+    "телеграм", "telegram", "тг", "здесь", "сюда", "в этом чате", "в личк",
+    "ватсап", "вотсап", "вацап", "whatsapp", "вайбер", "viber", "max",
+    "звон", "номер", "почт", "email", "e-mail",
+    "утр", "днём", "днем", "вечер", "обед", "после", "будн", "выходн", "завтра", "сегодня",
+    "понедельник", "вторник", "сред", "четверг", "пятниц", "суббот", "воскресен", "любое время",
+)
+TIME_RE = re.compile(r"\b\d{1,2}[:.]\d{2}\b|\b(?:в|с|до|после)\s+\d{1,2}\b")
+
+
+def _mentions(text: str, markers) -> bool:
+    lowered = f" {text.lower()} "
+    return any(re.search(rf"(?<![а-яa-z]){re.escape(m)}", lowered) for m in markers)
+
+
+def contact_step(text: str, dialog_context: str) -> str | None:
+    """Что делать с ответом лида на просьбу о контакте. dialog_context — история ДО этого ответа.
+    'done' — контакт есть, передаём специалисту; 'ask_phone' / 'offer_alternatives' / 'ask_email' —
+    уточняем; None — это не ответ про контакт (вопрос и т.п.), пусть отвечает бот как обычно."""
+    lowered = text.lower()
+    refuses_phone = any(m in lowered for m in PHONE_REFUSAL_MARKERS)
+    if not refuses_phone and not looks_like_contact(text):
+        return None
+    if extract_phone(text) or EMAIL_RE.search(text):
+        return "done"
+    offered = ALTERNATIVES_TEXT in (dialog_context or "")
+    if refuses_phone:
+        return "done" if offered else "offer_alternatives"
+    if _mentions(text, ("почт", "email", "e-mail", "мейл", "имейл")):
+        return "done" if EMAIL_REQUEST_TEXT in (dialog_context or "") else "ask_email"
+    if _mentions(text, _MESSENGER_MARKERS):
+        return "done"
+    # Только время / «звоните» без номера: один раз просим номер, потом предлагаем тг или почту.
+    if PHONE_NUMBER_REQUEST_TEXT not in (dialog_context or ""):
+        return "ask_phone"
+    return "done" if offered else "offer_alternatives"
+
+
+def looks_like_contact(text: str) -> bool:
+    """Лида попросили о времени и канале связи — похоже ли сообщение на такой ответ.
+    Номер телефона — всегда да. Без номера вопрос («а сколько стоит?») — нет: на него ответит бот."""
+    if extract_phone(text) or EMAIL_RE.search(text or ""):
+        return True
+    if "?" in text:
+        return False
+    lowered = f" {text.lower()} "
+    if TIME_RE.search(lowered):
+        return True
+    return any(re.search(rf"(?<![а-яa-z]){re.escape(m)}", lowered) for m in CONTACT_MARKERS)
 
 
 def is_status_question(text: str) -> bool:
@@ -80,13 +172,12 @@ def score_message(text: str) -> ScoreResult:
 
 def generate_touch(band: str, funnel_stage: str, dialog_text: str) -> str:
     system_prompt = (
-        f"{TEMPLATE_A_OG1}\n\nЭтап воронки лида: {funnel_stage}. Бэнд готовности: {band}.\n\n"
+        f"{TEMPLATE_A_OG1}\n\n{MANAGER_STYLE_OG1}\n\nЭтап воронки лида: {funnel_stage}. Бэнд готовности: {band}.\n\n"
         f"АКТУАЛЬНЫЕ ТАРИФЫ И ЦЕНЫ og1 (реальные факты, можно называть лиду):\n"
         f"{catalog.tariff_price_summary()}\n\n"
-        "Напиши одно короткое сообщение-касание лиду (2-4 предложения) голосом бизнеса. "
+        "Напиши одно короткое сообщение лиду (1-3 предложения) в стиле менеджера выше. "
         "Если лид спрашивает про тарифы или цену - НАЗОВИ конкретные тарифы и цену «от» из списка "
-        "выше (не уклоняйся к менеджеру вместо ответа), и добавь, что точную цену под класс ребёнка "
-        "и цель подберёт менеджер на звонке. Не выдумывай цифры, которых нет в списке выше.\n\n"
+        "выше (не уклоняйся к менеджеру вместо ответа). Не выдумывай цифры, которых нет в списке выше.\n\n"
         "Реплики «менеджер» в диалоге - это живой менеджер og1, который пишет с этого же аккаунта. "
         "Ты продолжаешь разговор от его лица: не здоровайся и не представляйся заново, не повторяй "
         "уже сказанное, отвечай на то, что лид сказал в ответ на слова менеджера."
@@ -100,7 +191,7 @@ def generate_touch(band: str, funnel_stage: str, dialog_text: str) -> str:
 
 def generate_closing(dialog_text: str) -> str | None:
     """Короткое тёплое завершение диалога после отказа; None, если ИИ не ответил (шаблон не шлём)."""
-    return llm.call_text(f"{TEMPLATE_A_OG1}\n\n{CLOSING_PROMPT_OG1}", dialog_text)
+    return llm.call_text(f"{TEMPLATE_A_OG1}\n\n{MANAGER_STYLE_OG1}\n\n{CLOSING_PROMPT_OG1}", dialog_text)
 
 
 def warmup_step_text(silence_days: int) -> str | None:

@@ -7,7 +7,7 @@
        hx-swap="outerHTML"
        hx-push-url="true"
        href="/catcher?view={{ key }}">
-      {{ v['label'] }}{% if key == 'new' %} ({{ counts['new'] }}){% elif key == 'maybe' %} ({{ counts['new_maybe'] }}){% elif key == 'all' %} ({{ counts['total'] }}){% endif %}
+      {{ v['label'] }}{% if key == 'new' %} ({{ counts['new'] }}){% elif key == 'all' %} ({{ counts['total'] }}){% endif %}
     </a>
     {% endfor %}
   </div>
@@ -36,7 +36,6 @@
   {% else %}
   <div class="empty-state">
     {% if view == 'new' %}Новых кандидатов нет — нажмите «Выгрузить сейчас» у источника.
-    {% elif view == 'maybe' %}Спорных кандидатов нет.
     {% elif view == 'contacted' %}Вы ещё никому не писали.
     {% else %}Кандидатов пока нет.{% endif %}
   </div>

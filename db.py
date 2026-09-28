@@ -95,8 +95,17 @@ ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "last_in_msg_id": "INTEGER NOT NULL DEFAULT 0",
         # когда лид отказался и получил вежливое завершение — второй раз не прощаемся
         "declined_at": "TEXT",
+        # имя из профиля Telegram (first_name + last_name) — для карточки готового лида
+        "name": "TEXT",
     },
-    "orders": {},
+    "orders": {
+        # что лид прислал в ответ на «номер и удобное время для звонка» (весь текст, как есть)
+        "contact": "TEXT", "contact_at": "TEXT",
+        # лента готовых лидов: куда ушла карточка ("chat:msg,..."), когда и кем передан специалисту
+        "ready_msgs": "TEXT", "passed_at": "TEXT", "passed_by": "TEXT",
+        # Megabitra: id лида там и строка результата для карточки («лид #123 принят» / причина)
+        "megabitra_id": "TEXT", "megabitra_result": "TEXT",
+    },
     "handoff": {},
     "meta": {},
     "agent_history": {},
@@ -179,6 +188,22 @@ def get_or_create_lead(conn: sqlite3.Connection, tg_id: int, username: str | Non
     )
     return conn.execute("SELECT * FROM leads WHERE id = ?", (cur.lastrowid,)).fetchone()
 
+
+
+def display_name(user) -> str | None:
+    """Имя из профиля Telegram (User или Chat): «Имя Фамилия», пустое — None."""
+    parts = [getattr(user, "first_name", None), getattr(user, "last_name", None)]
+    name = " ".join(p.strip() for p in parts if p and p.strip())
+    return name or None
+
+
+def set_lead_name(conn: sqlite3.Connection, lead_id: int, name: str | None) -> None:
+    if name:
+        conn.execute("UPDATE leads SET name = ? WHERE id = ?", (name, lead_id))
+
+
+def leads_without_name(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM leads WHERE name IS NULL OR name = ''").fetchall()
 
 
 def ensure_lead(conn: sqlite3.Connection, tg_id: int, username: str | None) -> sqlite3.Row:
@@ -332,6 +357,51 @@ def latest_order_for_lead(conn: sqlite3.Connection, lead_id: int) -> sqlite3.Row
     ).fetchone()
 
 
+def order_awaiting_contact(conn: sqlite3.Connection, lead_id: int) -> sqlite3.Row | None:
+    """Открытая заявка, по которой бот попросил номер для звонка, а лид его ещё не прислал."""
+    return conn.execute(
+        """SELECT * FROM orders WHERE lead_id = ? AND closed = 0 AND status = 'заявка' AND contact IS NULL
+           ORDER BY created_at DESC LIMIT 1""",
+        (lead_id,),
+    ).fetchone()
+
+
+def set_order_contact(conn: sqlite3.Connection, order_id: int, contact: str) -> None:
+    conn.execute(
+        "UPDATE orders SET contact = ?, contact_at = ?, updated_at = ? WHERE id = ?",
+        (contact, now(), now(), order_id),
+    )
+
+
+def set_ready_msgs(conn: sqlite3.Connection, order_id: int, msgs: list[tuple[int, int]]) -> None:
+    conn.execute(
+        "UPDATE orders SET ready_msgs = ? WHERE id = ?",
+        (",".join(f"{chat}:{msg}" for chat, msg in msgs), order_id),
+    )
+
+
+def set_megabitra_result(conn: sqlite3.Connection, order_id: int, megabitra_id, text: str) -> None:
+    conn.execute(
+        "UPDATE orders SET megabitra_id = ?, megabitra_result = ? WHERE id = ?",
+        (str(megabitra_id) if megabitra_id else None, text, order_id),
+    )
+
+
+def mark_passed_to_specialist(conn: sqlite3.Connection, order_id: int, by: str) -> bool:
+    """False — уже был отмечен (второй оператор нажал кнопку на своей копии карточки)."""
+    cur = conn.execute(
+        "UPDATE orders SET passed_at = ?, passed_by = ?, updated_at = ? WHERE id = ? AND passed_at IS NULL",
+        (now(), by, now(), order_id),
+    )
+    return cur.rowcount > 0
+
+
+def ready_orders_not_passed(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM orders WHERE contact IS NOT NULL AND passed_at IS NULL AND closed = 0 ORDER BY contact_at"
+    ).fetchall()
+
+
 def mark_handed_off(conn: sqlite3.Connection, order_id: int) -> None:
     conn.execute(
         "UPDATE orders SET status = 'документы', handed_off_at = ?, updated_at = ? WHERE id = ?",
@@ -401,7 +471,7 @@ def next_status(status: str) -> str | None:
 
 def list_orders_for_reminders(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
-        "SELECT * FROM orders WHERE closed = 0 AND status = 'заявка'"
+        "SELECT * FROM orders WHERE closed = 0 AND status = 'заявка' AND contact IS NULL"
     ).fetchall()
 
 
