@@ -127,6 +127,33 @@ def contact_step(text: str, dialog_context: str) -> str | None:
     return "done" if offered else "offer_alternatives"
 
 
+# Согласие на предложение бота связаться со специалистом — сразу к сбору контакта, без оглядки
+# на балл: ИИ-оценка «да» бывает и 70, а человек уже согласился.
+_YES_MARKERS = ("да", "давайте", "давай", "можно", "хорошо", "конечно", "ок", "окей", "ok", "удобно",
+                "согласна", "согласен", "звоните", "позвоните", "пусть позвонит", "было бы здорово",
+                "интересно", "не против", "го", "угу", "ага")
+_NO_MARKERS = ("нет", "не надо", "не нужно", "не сейчас", "пока не", "позже", "потом", "сам посмотр",
+               "сама посмотр", "не звон", "подумаю", "не удобно", "неудобно")
+
+
+def accepted_specialist_offer(dialog_before: str, text: str) -> bool:
+    """Последняя реплика бота предлагала связь со специалистом, а лид коротко согласился."""
+    lines = [l for l in (dialog_before or "").splitlines() if l.strip()]
+    last = next((l for l in reversed(lines) if l.startswith(("бот:", "менеджер:"))), "")
+    offer = last.lower()
+    if "?" not in offer or not ("специалист" in offer or "позвон" in offer or "созвон" in offer):
+        return False
+    answer = f" {text.lower().strip()} "
+    if "?" in text or any(m in answer for m in _NO_MARKERS):
+        return False
+    return any(re.search(rf"(?<![а-яa-z]){re.escape(m)}(?![а-яa-z])", answer) for m in _YES_MARKERS)
+
+
+def sent_contact_unasked(text: str) -> bool:
+    """В сообщении есть телефон или почта — лид сам оставил контакт для связи."""
+    return bool(extract_phone(text) or EMAIL_RE.search(text or ""))
+
+
 def looks_like_contact(text: str) -> bool:
     """Лида попросили о времени и канале связи — похоже ли сообщение на такой ответ.
     Номер телефона — всегда да. Без номера вопрос («а сколько стоит?») — нет: на него ответит бот."""

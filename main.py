@@ -102,6 +102,25 @@ async def handle_incoming(event, source: str) -> None:
     if await _take_contact_if_awaited(event, lead, text, who):
         return
 
+    # Лид сам прислал телефон или почту (например, в ответ на «оставьте контакты») — сразу к специалисту.
+    if not guard_outage and pipeline.sent_contact_unasked(text):
+        given = pipeline.ScoreResult(score=90, band="very_hot", reasoning="сам оставил контакт", source="rule")
+        with db.session() as conn:
+            db.set_lead_score(conn, lead["id"], given.score)
+        logger.info("CONTACT-UNASKED lead=%s: сам прислал контакт", tg_id)
+        await _escalate(event, lead, dialog_context, given, who, contact_text=text)
+        return
+
+    # Лид согласился на предложение связаться со специалистом — сразу просим контакт.
+    if not guard_outage and pipeline.accepted_specialist_offer(lead["dialog_context"] or "", text):
+        agreed = pipeline.ScoreResult(score=85, band="very_hot", reasoning="согласился на связь со специалистом",
+                                      source="rule")
+        with db.session() as conn:
+            db.set_lead_score(conn, lead["id"], agreed.score)
+        logger.info("AGREED lead=%s: согласился на связь со специалистом", tg_id)
+        await _escalate(event, lead, dialog_context, agreed, who)
+        return
+
     if guard_outage:
         await alerts.report_llm_outage(who)
         return
@@ -290,7 +309,10 @@ async def _take_contact_if_awaited(event, lead, text: str, who: str) -> bool:
     return True
 
 
-async def _escalate(event, lead, dialog_text: str, score_result: pipeline.ScoreResult, who: str = "") -> None:
+async def _escalate(event, lead, dialog_text: str, score_result: pipeline.ScoreResult, who: str = "",
+                    contact_text: str | None = None) -> None:
+    """contact_text — лид сам сразу прислал контакт (телефон/почту): заявку заводим и сразу передаём
+    специалисту, не переспрашивая номер."""
     # Уже просили номер по открытой заявке — не плодим вторую, просто напоминаем.
     with db.session() as conn:
         pending = db.order_awaiting_contact(conn, lead["id"])
@@ -315,6 +337,9 @@ async def _escalate(event, lead, dialog_text: str, score_result: pipeline.ScoreR
         db.create_handoff(conn, order["id"], lead["id"], score_result.score, extracted.summary)
 
     logger.info("ESCALATE lead=%s order=%s tariff=%s", lead["tg_id"], order["id"], extracted.tariff_name)
+    if contact_text is not None:
+        await _take_contact_if_awaited(event, lead, contact_text, who or f"ID {lead['tg_id']}")
+        return
     # Для og1 сделку закрывает человек (договор, документы — og1/PLAN.md п.4), поэтому вместо
     # ссылки на бота-кассира просим номер и время для звонка менеджера.
     await _reply(event, pipeline.CALL_REQUEST_TEXT, lead_id=lead["id"])

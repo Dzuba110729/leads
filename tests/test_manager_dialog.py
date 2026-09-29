@@ -480,3 +480,57 @@ def test_megabitra_payload_and_phone_format(tmp_path, monkeypatch):
 def test_megabitra_is_off_until_configured():
     import megabitra
     assert CONFIG.megabitra_offer == "" or megabitra.enabled() is bool(CONFIG.megabitra_flow and CONFIG.megabitra_lead_ip)
+
+
+def test_style_allows_og1_links_but_not_payment():
+    from prompts import MANAGER_STYLE_OG1
+    for url in ("https://og1.ru/czena", "https://og1.ru/attestacziya", "https://og1.ru/akczii", "https://og1.ru"):
+        assert url in MANAGER_STYLE_OG1
+    assert "Ссылок, ботов и оплаты не предлагай" not in MANAGER_STYLE_OG1
+
+
+def test_accepted_specialist_offer_detection():
+    import pipeline
+    offer = "лид: сколько стоит?\nбот: От 12 050 ₽. Специалист может подобрать план под 9 класс - удобно будет, если он позвонит?"
+    for yes in ("Да", "да, давайте", "Хорошо", "можно", "ок", "Да, удобно"):
+        assert pipeline.accepted_specialist_offer(offer, yes), yes
+    for no in ("нет, пока сама посмотрю", "а сколько стоит аттестация?", "подумаю", "не сейчас"):
+        assert not pipeline.accepted_specialist_offer(offer, no), no
+    plain = "бот: Да, это цена за месяц. В каком классе ребёнок?"
+    assert not pipeline.accepted_specialist_offer(plain, "да")  # «да» не на предложение связи
+
+
+def test_yes_to_offer_escalates_even_with_low_score(tmp_path, monkeypatch):
+    import pipeline
+    db_path = _setup(tmp_path, monkeypatch)
+    _patch_hot(monkeypatch, 60)  # ИИ поставил бы «тёплый»
+    monkeypatch.setattr(pipeline, "extract_order", lambda text: SimpleNamespace(
+        tariff_name="Ученический", price=12050.0, department="приёмная_комиссия", needs_estimator=False,
+        summary="9 класс, ОГЭ"))
+    with db.session(db_path) as conn:
+        lead = db.get_or_create_lead(conn, tg_id=717, username="p17")
+        db.append_dialog_context(conn, lead["id"], "бот", "Специалист подберёт план под 9 класс - удобно будет, если он позвонит?")
+    chat = SimpleNamespace(id=717, username="p17", bot=False, is_self=False)
+    event = _Event(chat, "Да, давайте")
+    asyncio.run(main.handle_incoming(event, source="dm"))
+    assert event.replies == [pipeline.CALL_REQUEST_TEXT]
+
+
+def test_phone_sent_without_being_asked_goes_straight_to_specialist(tmp_path, monkeypatch):
+    import pipeline
+    db_path = _setup(tmp_path, monkeypatch)
+    sent = _patch_hot(monkeypatch, 60)
+    monkeypatch.setattr(pipeline, "extract_order", lambda text: SimpleNamespace(
+        tariff_name="Ученический", price=12050.0, department="приёмная_комиссия", needs_estimator=False,
+        summary="9 класс, ОГЭ"))
+    with db.session(db_path) as conn:
+        lead = db.get_or_create_lead(conn, tg_id=718, username="p18")
+        db.append_dialog_context(conn, lead["id"], "бот", "Если хотите подробнее - оставьте контакты, специалист всё расскажет.")
+    chat = SimpleNamespace(id=718, username="p18", bot=False, is_self=False)
+    event = _Event(chat, "+381 64 555 1234, после 17")
+    asyncio.run(main.handle_incoming(event, source="dm"))
+    assert event.replies == [pipeline.CONTACT_THANKS_TEXT]  # номер не переспрашиваем
+    with db.session(db_path) as conn:
+        order = conn.execute("SELECT * FROM orders").fetchone()
+        assert order["contact"] == "+381 64 555 1234, после 17"
+    assert _lead(db_path, 718)["manual_mode"] == 1
