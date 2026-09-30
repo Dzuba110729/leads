@@ -36,3 +36,12 @@ def test_build_document_groups_by_chat_and_links():
     for r in batch[1:]:
         rng = next(iter(r.values()))["range"]
         assert 1 <= rng["startIndex"] < rng["endIndex"] <= total
+
+
+def test_vk_candidate_gets_vk_contact():
+    rows = [_row(source_url="https://vk.com/ourhomeedu", source_platform="vk", author_username="lenkamin4anka",
+                 author_name="Лена", author_tg_id=None, message_url="https://vk.com/wall-1_2?reply=3")]
+    _, b = gdocs.build_leads_document(rows)
+    assert "1. Лена ·" in b.text
+    assert "Написать в личку: https://vk.com/lenkamin4anka" in b.text
+    assert "t.me" not in b.text

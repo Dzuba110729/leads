@@ -56,6 +56,13 @@ SCHEMA: dict[str, str] = {
 
 # Колонки, которые могли появиться позже - идемпотентная эволюция схемы (см. db.py:ADDITIVE_COLUMNS)
 ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
+    # Запомненный Telegram-peer: без него каждый обход заново ищет чат по @username
+    # (ResolveUsernameRequest), а у этого запроса жёсткий суточный лимит -> FloodWait на часы.
+    "source_chats": {
+        "tg_peer_type": "TEXT",
+        "tg_peer_id": "INTEGER",
+        "tg_access_hash": "INTEGER",
+    },
     "raw_messages": {
         "processed": "INTEGER NOT NULL DEFAULT 0",
         "author_username": "TEXT",
@@ -124,6 +131,14 @@ def update_cursor(conn: sqlite3.Connection, source_id: int, last_message_id: str
         "UPDATE source_chats SET last_message_id = ?, last_checked_at = ? WHERE id = ?",
         (last_message_id, now(), source_id),
     )
+
+
+def save_tg_peer(conn: sqlite3.Connection, source_id: int, peer_type: str, peer_id: int, access_hash: int | None) -> None:
+    conn.execute(
+        "UPDATE source_chats SET tg_peer_type = ?, tg_peer_id = ?, tg_access_hash = ? WHERE id = ?",
+        (peer_type, peer_id, access_hash, source_id),
+    )
+    conn.commit()
 
 
 # --- raw_messages -------------------------------------------------------------
@@ -249,7 +264,8 @@ CANDIDATES_PAGE_SIZE = 50
 VISIBLE_SQL = "catch_candidates.confidence = 'high'"
 
 
-# Когда автор написал сообщение, в сравнимом виде: TG хранит ISO-дату, VK — unix-время строкой.
+# Когда автор написал сообщение, в сравнимом виде: TG и браузерный VK хранят ISO-дату,
+# VK через API — unix-время строкой.
 POSTED_AT_SQL = """CASE WHEN raw_messages.posted_at GLOB '[0-9]*' AND raw_messages.posted_at NOT LIKE '%-%'
     THEN datetime(raw_messages.posted_at, 'unixepoch') ELSE datetime(raw_messages.posted_at) END"""
 
@@ -276,9 +292,11 @@ def list_candidates(
                raw_messages.author AS author_name,
                raw_messages.author_username AS author_username,
                raw_messages.author_tg_id AS author_tg_id,
-               raw_messages.posted_at AS posted_at
+               raw_messages.posted_at AS posted_at,
+               source_chats.platform AS source_platform
         FROM catch_candidates
         JOIN raw_messages ON raw_messages.id = catch_candidates.raw_message_id
+        JOIN source_chats ON source_chats.id = raw_messages.source_chat_id
         {clause}
         ORDER BY {POSTED_AT_SQL} IS NULL, {POSTED_AT_SQL} DESC, catch_candidates.created_at DESC
         LIMIT ? OFFSET ?
@@ -349,9 +367,11 @@ def get_candidate(conn: sqlite3.Connection, candidate_id: int) -> sqlite3.Row | 
                raw_messages.url AS message_url,
                raw_messages.author AS author_name,
                raw_messages.author_username AS author_username,
-               raw_messages.author_tg_id AS author_tg_id
+               raw_messages.author_tg_id AS author_tg_id,
+               source_chats.platform AS source_platform
         FROM catch_candidates
         JOIN raw_messages ON raw_messages.id = catch_candidates.raw_message_id
+        JOIN source_chats ON source_chats.id = raw_messages.source_chat_id
         WHERE catch_candidates.id = ?
         """,
         (candidate_id,),
@@ -360,3 +380,35 @@ def get_candidate(conn: sqlite3.Connection, candidate_id: int) -> sqlite3.Row | 
 
 def mark_contacted(conn: sqlite3.Connection, candidate_id: int) -> None:
     conn.execute("UPDATE catch_candidates SET status = 'contacted' WHERE id = ?", (candidate_id,))
+
+
+# --- контакт автора ----------------------------------------------------------------------------
+
+def _field(row, name):
+    """Поле и из sqlite3.Row, и из dict (в тестах и старых выборках части колонок нет)."""
+    try:
+        return row[name]
+    except (IndexError, KeyError):
+        return None
+
+
+def author_label(row) -> str:
+    """Как подписать автора: в Telegram — @username, в VK — имя (короткое имя там не «ник»)."""
+    username, name = _field(row, "author_username"), _field(row, "author_name")
+    if _field(row, "source_platform") == "vk":
+        return name or (f"vk.com/{username}" if username else "автор неизвестен")
+    return f"@{username}" if username else (name or "автор неизвестен")
+
+
+def author_link(row) -> str | None:
+    """Ссылка на личку автора — только из выгруженных данных, не из ответа модели (П1 контакты
+    не выдумывает, но и полагаться на это незачем): TG — t.me/<username> или tg://user,
+    VK — vk.com/<id… или короткое имя>."""
+    username, tg_id = _field(row, "author_username"), _field(row, "author_tg_id")
+    if _field(row, "source_platform") == "vk":
+        return f"https://vk.com/{username}" if username else None
+    if username:
+        return f"https://t.me/{username}"
+    if tg_id:
+        return f"tg://user?id={tg_id}"
+    return None

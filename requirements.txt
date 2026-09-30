@@ -8,6 +8,7 @@ python-multipart>=0.0.9
 uvicorn[standard]>=0.30
 anthropic>=0.34
 vk_api>=11.9
+playwright>=1.49
 pytest>=8.2
 google-api-python-client>=2.140
 google-auth>=2.30

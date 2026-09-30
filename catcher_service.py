@@ -42,7 +42,12 @@ async def run_source(source_id: int) -> SourceRunResult:
             else:
                 import catcher_vk
 
-                fetched = await asyncio.to_thread(catcher_vk.fetch_new_messages, conn, source)
+                # sqlite3-соединение нельзя передавать в другой поток — открываем своё внутри
+                def _fetch_vk() -> int:
+                    with db.session() as thread_conn:
+                        return catcher_vk.fetch_new_messages(thread_conn, source)
+
+                fetched = await asyncio.to_thread(_fetch_vk)
         except Exception as exc:
             logger.exception("fetch failed for source %s", source_id)
             return SourceRunResult(source_id, url, 0, 0, error=f"выгрузка: {exc}")

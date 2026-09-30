@@ -231,9 +231,7 @@ async def unblock(request: Request, lead_id: int):
 
 def _catcher_candidate_dict(c) -> dict:
     d = dict(c)
-    username = d.get("author_username")
-    tg_id = d.get("author_tg_id")
-    d["lead_link"] = f"https://t.me/{username}" if username else (f"tg://user?id={tg_id}" if tg_id else None)
+    d["lead_link"] = catcher_db.author_link(d)
     return d
 
 

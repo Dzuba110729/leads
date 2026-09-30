@@ -10,6 +10,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+import catcher_db
 from config import CONFIG
 
 logger = logging.getLogger(__name__)
@@ -94,13 +95,7 @@ class DocBuilder:
 
 
 def _lead_link(c) -> str | None:
-    username = c["author_username"]
-    tg_id = c["author_tg_id"]
-    if username:
-        return f"https://t.me/{username}"
-    if tg_id:
-        return f"tg://user?id={tg_id}"
-    return None
+    return catcher_db.author_link(c)
 
 
 def _fmt_date(value: str | None) -> str:
@@ -128,7 +123,7 @@ def build_leads_document(candidates: list, title_suffix: str = "") -> tuple[str,
             current_source = c["source_url"]
             b.line(f"Чат: {current_source}", heading="HEADING_2", link=current_source)
         n += 1
-        author = c["author_username"] and f"@{c['author_username']}" or c["author_name"] or "автор неизвестен"
+        author = catcher_db.author_label(c)
         maybe = " (под вопросом)" if c["confidence"] == "maybe" else ""
         b.line(f"{n}. {author} · {_fmt_date(c['posted_at'])}{maybe}", heading="HEADING_3")
         b.line(f"«{c['quote']}»", bold_prefix="Что написал: ")

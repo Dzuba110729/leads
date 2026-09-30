@@ -137,6 +137,9 @@ class Config:
     catcher_tg_string_session: str = os.getenv("CATCHER_TG_STRING_SESSION", "")
     catcher_tg_phone: str = os.getenv("CATCHER_TG_PHONE", "")
     vk_access_token: str = os.getenv("VK_ACCESS_TOKEN", "")
+    # Без токена VK читается браузером (vk_browser.py) на профиле, куда оператор один раз
+    # вошёл через vk_browser_login.py. Относительный путь — от папки проекта.
+    vk_browser_profile_dir: str = os.getenv("VK_BROWSER_PROFILE_DIR", "secrets/vk_browser_profile")
     # Не анализируем сообщения старше этого срока - иначе первая выгрузка старого чата
     # начинает читать историю с самого начала (могут оказаться сообщения многолетней давности)
     catcher_max_message_age_days: int = int(os.getenv("CATCHER_MAX_MESSAGE_AGE_DAYS", "180"))

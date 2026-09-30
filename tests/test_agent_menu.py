@@ -289,3 +289,37 @@ def test_sources_list_is_paginated_for_many_chats(tmp_path, monkeypatch):
     toggle = kb.inline_keyboard[0][0].callback_data
     assert toggle.startswith("cat:toggle:") and toggle.endswith(":6")  # после паузы — та же страница
     assert agent_menu._page_from("cat:sources:p:3") == 3 and agent_menu._page_from("cat:pick") == 0
+
+
+def test_parse_vk_links_on_all_domains():
+    expected = ("vk", "https://vk.com/ourhomeedu")
+    assert agent_menu.parse_source_link("https://vk.ru/ourhomeedu") == expected
+    assert agent_menu.parse_source_link("https://m.vk.ru/ourhomeedu/") == expected
+    assert agent_menu.parse_source_link("https://www.vk.com/ourhomeedu?utm_source=tg&utm_medium=x") == expected
+    assert agent_menu.parse_source_link("m.vk.com/ourhomeedu#wall") == expected
+    assert agent_menu.parse_source_link("https://vk.com/wall-76168813_17549") == ("vk", "https://vk.com/club76168813")
+    r = agent_menu.describe_added({"added": [], "duplicates": [], "invalid": ["https://t.me/+x"]})
+    assert "vk.com" in r
+
+
+def test_vk_candidate_card_links_to_vk_profile(tmp_path, monkeypatch):
+    _db(tmp_path, monkeypatch)
+    with db.session() as conn:
+        catcher_db.migrate(conn)
+        src = catcher_db.add_source(conn, "vk", "https://vk.com/ourhomeedu")
+        mid = catcher_db.insert_raw_message(
+            conn, source_chat_id=src["id"], external_id="205_300", author="Ольга Петрова",
+            text="ищем школу", url="https://vk.com/wall-1_205?reply=300",
+            posted_at="2026-09-29T10:00:00+03:00", author_username="id13750322", reply_to_external_id="205",
+        )
+        catcher_db.add_candidate(conn, raw_message_id=mid, quote="ищем школу", reason="ищет",
+                                 contact_url="https://t.me/выдумано", opener_text="Здравствуйте")
+    text, kb = agent_menu.render_candidate(0)
+    assert "Ольга Петрова" in text and "@id13750322" not in text
+    urls = {b.text: b.url for row in kb.inline_keyboard for b in row if b.url}
+    assert urls["👤 Написать в личку"] == "https://vk.com/id13750322"
+    assert urls["💬 Комментарий в VK"] == "https://vk.com/wall-1_205?reply=300"
+    with db.session() as conn:
+        out = json.loads(agent_bot._tool_list_recent_candidates(5, "new"))
+    assert out[0]["author"] == "Ольга Петрова"
+    assert out[0]["author_link"] == "https://vk.com/id13750322"

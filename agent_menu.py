@@ -30,6 +30,7 @@ import catcher_db
 import db
 import gdocs
 import runtime
+import vk_browser
 from config import CONFIG, save_env_value
 
 logger = logging.getLogger(__name__)
@@ -99,7 +100,7 @@ def _fmt_dt(value: str | None) -> str:
 
 
 def _fmt_posted(value: str | None) -> str:
-    """Когда автор написал сообщение в чате: TG хранит ISO-дату, VK — unix-время строкой."""
+    """Когда автор написал сообщение в чате: ISO-дата (TG, VK через браузер) или unix-время строкой (VK API)."""
     if not value:
         return "дата неизвестна"
     try:
@@ -286,6 +287,10 @@ def render_lead_card(lead_id: int, note: str = "") -> tuple[str, InlineKeyboardM
 _awaiting_source: set[int] = set()
 
 
+# vk.ru — новый домен VK (vk.com туда перенаправляет); www. срезается раньше
+VK_PREFIXES = ("vk.com/", "m.vk.com/", "vk.ru/", "m.vk.ru/")
+
+
 def parse_source_link(text: str) -> tuple[str, str] | None:
     """Ссылка/упоминание группы → (платформа, нормализованная ссылка на сам чат) или None.
     Ссылку на сообщение (t.me/chat/123) сводим к чату; приглашения (t.me/+..., joinchat) не
@@ -300,15 +305,19 @@ def parse_source_link(text: str) -> tuple[str, str] | None:
             if not name or name.startswith("+") or name in ("joinchat", "c", "s"):
                 return None
             return "tg", f"https://t.me/{name}"
-    for prefix in ("vk.com/", "m.vk.com/"):
+    for prefix in VK_PREFIXES:
         if link.startswith(prefix):
-            name = link[len(prefix):].split("/")[0].split("?")[0]
+            name = link[len(prefix):].split("/")[0].split("?")[0].split("#")[0]
+            # Ссылка на пост (vk.com/wall-123_45) → само сообщество club123
+            wall = re.fullmatch(r"wall-(\d+)_\d+", name)
+            if wall:
+                name = f"club{wall.group(1)}"
             return ("vk", f"https://vk.com/{name}") if name else None
     return None
 
 
 def _looks_like_link(token: str) -> bool:
-    return token.startswith("@") or any(m in token for m in ("t.me/", "telegram.me/", "vk.com/", "http"))
+    return token.startswith("@") or any(m in token for m in ("t.me/", "telegram.me/", "vk.com/", "vk.ru/", "http"))
 
 
 def add_sources_from_text(text: str) -> dict[str, list[str]]:
@@ -345,7 +354,8 @@ def describe_added(result: dict[str, list[str]]) -> str:
     if result["invalid"]:
         parts.append(
             "Не получилось добавить: " + ", ".join(result["invalid"])
-            + "\n(нужна ссылка на открытую группу вида https://t.me/название; ссылки-приглашения t.me/+... не подходят)"
+            + "\n(нужна ссылка на открытую группу вида https://t.me/название или сообщество VK "
+            "вида https://vk.com/название; ссылки-приглашения t.me/+... не подходят)"
         )
     return "\n".join(parts) or "Не нашёл в сообщении ни одной ссылки на чат."
 
@@ -455,7 +465,7 @@ def render_candidate(offset: int, note: str = "", only_high: bool = False) -> tu
         kb = _kb([_btn("▶️ Обойти все чаты", "cat:runall")], [_btn("« Ловец", "menu:catcher")])
         return (note + "\n\n" if note else "") + empty, kb
     c = rows[0]
-    author = f"@{c['author_username']}" if c["author_username"] else (c["author_name"] or "автор неизвестен")
+    author = catcher_db.author_label(c)
     text = (
         (note + "\n\n" if note else "")
         + f"<b>Кандидат {offset + 1} из {total}</b>\n"
@@ -465,11 +475,14 @@ def render_candidate(offset: int, note: str = "", only_high: bool = False) -> tu
         f"<b>Почему это лид:</b> {_e(c['reason'])}\n\n"
         f"<b>Вариант первого сообщения</b> (нажмите, чтобы скопировать):\n<code>{_e(c['opener_text'])}</code>"
     )
+    vk = c["source_platform"] == "vk"
     links = []
     if c["message_url"]:
-        links.append(_url_btn("💬 Сообщение в чате", c["message_url"]))
-    if c["author_username"]:
-        links.append(_url_btn("👤 Написать в личку", f"https://t.me/{c['author_username']}"))
+        links.append(_url_btn("💬 Комментарий в VK" if vk else "💬 Сообщение в чате", c["message_url"]))
+    # tg://user не открывается кнопкой у всех, поэтому в личку — только по http-ссылке
+    lead_link = catcher_db.author_link(c)
+    if lead_link and lead_link.startswith("http"):
+        links.append(_url_btn("👤 Написать в личку", lead_link))
     nav = [_btn("✅ Написал", f"cat:done:{c['id']}:{offset}{mode}")]
     if offset + 1 < total:
         nav.append(_btn("⏭ Дальше", f"cat:cand:{offset + 1}{mode}"))
@@ -582,7 +595,8 @@ def system_status() -> dict:
         "llm": bool(CONFIG.llm_api_key),
         "google_docs": gdocs.available(),
         "catcher_tg": bool(CONFIG.catcher_tg_string_session),
-        "vk": bool(CONFIG.vk_access_token),
+        # VK читается через API по токену или браузером после vk_browser_login.py
+        "vk": bool(CONFIG.vk_access_token) or vk_browser.session_ready(),
         "dry_run": CONFIG.dry_run,
         "scheduler_enabled": CONFIG.scheduler_enabled,
         "group_reply_mode": CONFIG.group_reply_mode,
@@ -847,7 +861,7 @@ async def cb_cat_add(cb: CallbackQuery) -> None:
         "Пришлите ссылку на <b>открытую</b> группу или канал — или сразу <b>список</b> "
         "(каждая ссылка с новой строки, через пробел или запятую):\n"
         "• Telegram: https://t.me/название или @название\n"
-        "• VK: https://vk.com/название\n\n"
+        "• VK: https://vk.com/название (или vk.ru/название)\n\n"
         "Служебный аккаунт ловца должен иметь доступ к чату (для закрытых — вступить в него заранее).",
         _kb([_btn("Отмена", "cat:addcancel")]),
     ))
@@ -864,7 +878,7 @@ async def cb_cat_add_cancel(cb: CallbackQuery) -> None:
 async def on_source_link(message: Message) -> None:
     if not await _guard(message):
         return
-    if parse_source_link(message.text) is None and not any(m in message.text for m in ("t.me", "vk.com", "@")):
+    if parse_source_link(message.text) is None and not any(m in message.text for m in ("t.me", "vk.com", "vk.ru", "@")):
         # Это не попытка прислать ссылку, а обычный вопрос — отдаём его свободному диалогу
         _awaiting_source.discard(message.chat.id)
         raise SkipHandler()

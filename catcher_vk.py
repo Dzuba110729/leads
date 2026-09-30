@@ -1,6 +1,8 @@
 """Инкрементальная выгрузка постов открытого VK-сообщества (отдельный аккаунт/токен).
 
-Постраничный `wall.get`, останавливается на первом уже виденном `external_id` (VK не даёт
+Два пути: с VK_ACCESS_TOKEN — VK API (ниже); без токена — настоящий браузер на сессии,
+в которую оператор вошёл через vk_browser_login.py (vk_browser.py, посты + комментарии).
+Путь через API: постраничный `wall.get`, останавливается на первом уже виденном `external_id` (VK не даёт
 offset_id-курсор как Telegram — сравниваем id постов напрямую). При рейт-лимите (code 6,
 "Too many requests per second") — ждём и продолжаем, как договорились для MVP (без ротации
 токенов/прокси).
@@ -41,7 +43,9 @@ def _wall_get_with_retry(vk, **kwargs):
 
 def fetch_new_messages(conn, source) -> int:
     if not CONFIG.vk_access_token:
-        raise RuntimeError("VK_ACCESS_TOKEN не задан в .env")
+        import vk_browser
+
+        return vk_browser.fetch_new_messages(conn, source)
 
     session = vk_api.VkApi(token=CONFIG.vk_access_token)
     vk = session.get_api()

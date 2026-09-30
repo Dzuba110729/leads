@@ -246,3 +246,19 @@ def test_claude_code_env_has_no_api_keys(monkeypatch):
     monkeypatch.setenv("LLM_API_KEY", "sk-test")
     env = claude_code._env()
     assert "ANTHROPIC_API_KEY" not in env and "LLM_API_KEY" not in env
+
+
+def test_tg_peer_is_remembered_and_reused():
+    import catcher_db
+    import catcher_tg
+    from telethon.tl.types import InputPeerChannel
+
+    conn = _mem_conn()
+    source = catcher_db.add_source(conn, "tg", "https://t.me/Parents_Chat")
+    assert catcher_tg._cached_peer(source) is None
+    assert catcher_tg._username_from_url(source["url"]) == "parents_chat"
+    assert catcher_tg._username_from_url("https://t.me/+abc") is None
+
+    catcher_db.save_tg_peer(conn, source["id"], "channel", 2223334445, 987654321)
+    peer = catcher_tg._cached_peer(catcher_db.get_source(conn, source["id"]))
+    assert peer == InputPeerChannel(2223334445, 987654321)
