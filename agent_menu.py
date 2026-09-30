@@ -11,6 +11,7 @@ import html
 import logging
 import re
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
@@ -107,6 +108,8 @@ def _fmt_posted(value: str | None) -> str:
         posted = datetime.fromtimestamp(int(value), timezone.utc) if value.isdigit() else datetime.fromisoformat(value)
     except ValueError:
         return value
+    if posted.tzinfo is None:  # старые строки VK без пояса — время московское, как на стене
+        posted = posted.replace(tzinfo=ZoneInfo(vk_browser.VK_TIMEZONE))
     days = (datetime.now(timezone.utc) - posted).days
     ago = "сегодня" if days == 0 else "вчера" if days == 1 else f"{days} дн. назад"
     return f"{posted.astimezone().strftime('%d.%m.%Y %H:%M')} ({ago})"

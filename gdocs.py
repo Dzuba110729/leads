@@ -36,7 +36,12 @@ def load_credentials():
 
         creds = Credentials.from_authorized_user_file(CONFIG.google_oauth_token_file, SCOPES)
         if creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            from google.auth.exceptions import RefreshError
+
+            try:
+                creds.refresh(Request())
+            except RefreshError as exc:
+                raise RuntimeError("вход в Google истёк или отозван — запустите google_login.py заново") from exc
             Path(CONFIG.google_oauth_token_file).write_text(creds.to_json(), encoding="utf-8")
         return creds
     if CONFIG.google_service_account_file:
