@@ -140,6 +140,22 @@ class Config:
     # Без токена VK читается браузером (vk_browser.py) на профиле, куда оператор один раз
     # вошёл через vk_browser_login.py. Относительный путь — от папки проекта.
     vk_browser_profile_dir: str = os.getenv("VK_BROWSER_PROFILE_DIR", "secrets/vk_browser_profile")
+    # Диалоги продаж в личке VK (vk_messenger.py): тот же браузерный профиль — это ОСНОВНОЙ личный
+    # аккаунт оператора, поэтому по умолчанию выключено и с жёсткими лимитами. Первым бот не пишет.
+    vk_sales_enabled: bool = _bool("VK_SALES_ENABLED", "0")
+    vk_sales_poll_seconds: int = int(os.getenv("VK_SALES_POLL_SECONDS", "180"))
+    vk_sales_max_per_hour: int = int(os.getenv("VK_SALES_MAX_PER_HOUR", "20"))
+    vk_sales_max_per_dialog_hour: int = int(os.getenv("VK_SALES_MAX_PER_DIALOG_HOUR", "6"))
+    vk_sales_delay_min: int = int(os.getenv("VK_SALES_DELAY_MIN", "20"))
+    vk_sales_delay_max: int = int(os.getenv("VK_SALES_DELAY_MAX", "90"))
+    # Сколько ждать браузер, если его держит обход ловца (сек); не дождались — пропускаем тик
+    vk_sales_lock_wait: int = int(os.getenv("VK_SALES_LOCK_WAIT", "600"))
+    # Личку VK проверяем только в эти часы по Москве («9-22» = с 9:00 до 21:59): круглосуточный
+    # опрос раз в несколько минут VK принимает за бота и показывает проверку (hash429).
+    vk_sales_hours: str = os.getenv("VK_SALES_HOURS", "9-22")
+    # Источник VK в ловце обходим не чаще раза в N часов: обход открывает десятки страниц подряд.
+    vk_crawl_min_hours: int = int(os.getenv("VK_CRAWL_MIN_HOURS", "20"))
+
     # Не анализируем сообщения старше этого срока - иначе первая выгрузка старого чата
     # начинает читать историю с самого начала (могут оказаться сообщения многолетней давности)
     catcher_max_message_age_days: int = int(os.getenv("CATCHER_MAX_MESSAGE_AGE_DAYS", "180"))

@@ -534,3 +534,41 @@ def test_phone_sent_without_being_asked_goes_straight_to_specialist(tmp_path, mo
         order = conn.execute("SELECT * FROM orders").fetchone()
         assert order["contact"] == "+381 64 555 1234, после 17"
     assert _lead(db_path, 718)["manual_mode"] == 1
+
+
+def test_userbot_reconnects_after_network_failures(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(main, "backfill_lead_names", lambda client: asyncio.sleep(0))
+
+    class _FlakyClient(_FakeClient):
+        def __init__(self):
+            super().__init__([])
+            self.starts = self.disconnects = 0
+
+        async def start(self, phone=None):
+            self.starts += 1
+            if self.starts == 1:
+                raise ConnectionError("нет сети")
+
+        async def run_until_disconnected(self):
+            if self.starts == 2:
+                raise ConnectionError("Connection to Telegram failed 5 time(s)")
+            await asyncio.sleep(3600)  # третье подключение держится
+
+        async def disconnect(self):
+            self.disconnects += 1
+
+    client = _FlakyClient()
+
+    async def run():
+        task = asyncio.ensure_future(main.run_userbot_forever(client, retry_delays=(0,)))
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if client.starts == 3:
+                break
+        assert not task.done()  # сбои не завершают задачу — остальной процесс живёт
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(run())
+    assert client.starts == 3 and client.disconnects == 2

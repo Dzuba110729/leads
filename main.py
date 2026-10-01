@@ -64,6 +64,28 @@ async def handle_incoming(event, source: str) -> None:
         if text is None:
             return
 
+    await process_lead_text(event, lead, text, who)
+
+
+def _platform(event) -> str:
+    """'vk' — ответ уходит в личку VK через браузер (vk_messenger.VkChannel), иначе Telegram."""
+    return getattr(event, "platform", None) or "tg"
+
+
+async def _notify_blocked(event, text: str) -> None:
+    if _platform(event) == "vk":
+        await alerts.notify_operators(text)
+    else:
+        await event.client.send_message(CONFIG.operator_chat, text)
+
+
+async def process_lead_text(event, lead, text: str, who: str) -> None:
+    """Ядро шагов 2-4, не зависящее от канала: реплика лида → guard → статус/контакт → скоринг →
+    касание, эскалация или молчание. `event` — событие Telethon или любой канал с тем же
+    интерфейсом (`chat_id`, `async reply(text)`, `platform`), например vk_messenger.VkChannel.
+    Входящее уже отмечено как обработанное (claim_incoming_message) до вызова."""
+    tg_id = lead["tg_id"]
+    username = lead["username"]
     with db.session() as conn:
         dialog_context = db.append_dialog_context(conn, lead["id"], "лид", text)
     if lead["manual_mode"]:
@@ -78,9 +100,7 @@ async def handle_incoming(event, source: str) -> None:
             db.block_lead(conn, lead["id"], guard_result.reasoning)
         logger.warning("BLOCKED lead=%s reason=%s", tg_id, guard_result.reasoning)
         if CONFIG.operator_chat and not CONFIG.dry_run:
-            await event.client.send_message(
-                CONFIG.operator_chat, f"⚠️ Заблокирован лид {tg_id} (@{username}): {guard_result.reasoning}"
-            )
+            await _notify_blocked(event, f"⚠️ Заблокирован лид {tg_id} (@{username}): {guard_result.reasoning}")
         return
 
     # Сбой ИИ (кончились деньги, неверный ключ): живым людям шаблонами не отвечаем — молчим
@@ -219,15 +239,20 @@ async def _media_to_text(event, lead, who: str) -> str | None:
             logger.info("VOICE lead=%s: %s расшифровано (%s симв.)", lead["tg_id"], kind, len(text))
             return f"[{kind}] {text}"
         kind += ", не удалось расшифровать"
+    await note_unanswered_media(lead, kind, who)
+    return None
+
+
+async def note_unanswered_media(lead, kind: str, who: str, where: str = "продающего аккаунта") -> None:
+    """Вложение, на которое бот не отвечает: пометка в истории и сигнал менеджеру."""
     with db.session() as conn:
         db.append_dialog_context(conn, lead["id"], "лид", f"[{kind}]")
     logger.info("MEDIA lead=%s: %s, бот не отвечает", lead["tg_id"], kind)
     if not lead["manual_mode"]:
         await alerts.notify_operators(
             f"📎 {who} прислал(а) {kind}. Бот на такое не отвечает — посмотрите сами в переписке "
-            "продающего аккаунта и ответьте, если нужно."
+            f"{where} и ответьте, если нужно."
         )
-    return None
 
 
 # Автоответ продавца тоже приходит в обработчик исходящих, а его id запоминается только после
@@ -273,7 +298,7 @@ async def _take_contact_if_awaited(event, lead, text: str, who: str) -> bool:
         return False
     follow_up = {
         "ask_phone": pipeline.PHONE_NUMBER_REQUEST_TEXT,
-        "offer_alternatives": pipeline.ALTERNATIVES_TEXT,
+        "offer_alternatives": pipeline.alternatives_text(_platform(event)),
         "ask_email": pipeline.EMAIL_REQUEST_TEXT,
     }.get(step)
     if follow_up:
@@ -418,9 +443,10 @@ async def daily_warmup_task(userbot, check_every_seconds: int = 300) -> None:
 
 
 USERBOT_ALIVE_KEY = "userbot_alive_at"
-# start() может зависнуть навсегда (например, после обрыва сети или сдвига часов) — тогда
-# процесс жив, но ничего не делает, и launchd его не перезапускает. Падаем по таймауту.
+# start() может зависнуть навсегда (например, после обрыва сети или сдвига часов) — обрываем
+# по таймауту и пробуем снова, не трогая остальные части процесса.
 USERBOT_START_TIMEOUT = 120
+USERBOT_RETRY_DELAYS = (15, 30, 60, 120, 300)
 HEARTBEAT_SECONDS = 60
 CATCH_UP_MAX = timedelta(days=2)
 
@@ -495,6 +521,46 @@ async def backfill_lead_names(userbot) -> None:
         logger.info("имена лидов: заполнено %s из %s", filled, len(leads))
 
 
+async def run_userbot_forever(userbot, retry_delays: tuple[int, ...] = USERBOT_RETRY_DELAYS) -> None:
+    """Держит продающий аккаунт на связи. Обрыв сети больше не гасит весь процесс (ботов меню и
+    CRM): переподключаемся с растущей паузой, а после восстановления догоняем пропущенные
+    сообщения с момента последнего heartbeat."""
+    attempt = 0
+    names_filled = False
+    while True:
+        heartbeat = None
+        try:
+            await asyncio.wait_for(userbot.start(phone=CONFIG.tg_phone or None), USERBOT_START_TIMEOUT)
+            attempt = 0
+            logger.info("userbot на связи")
+            with db.session() as conn:
+                alive_at = db.get_meta(conn, USERBOT_ALIVE_KEY)
+            await catch_up_missed(userbot, alive_at)
+            if not names_filled:
+                await backfill_lead_names(userbot)
+                names_filled = True
+            heartbeat = asyncio.ensure_future(userbot_heartbeat())
+            await userbot.run_until_disconnected()
+            logger.warning("userbot отключился — переподключаемся")
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            logger.error("userbot не подключился за %s с", USERBOT_START_TIMEOUT)
+        except Exception:
+            logger.exception("userbot потерял связь")
+        finally:
+            if heartbeat is not None:
+                heartbeat.cancel()
+        try:
+            await userbot.disconnect()
+        except Exception:
+            pass
+        delay = retry_delays[min(attempt, len(retry_delays) - 1)]
+        attempt += 1
+        logger.info("userbot: повторное подключение через %s с", delay)
+        await asyncio.sleep(delay)
+
+
 async def main() -> None:
     with db.session():
         pass  # прогреть/создать схему на старте
@@ -518,18 +584,8 @@ async def main() -> None:
         async def _on_group(event):
             await handle_incoming(event, source="group")
 
-        try:
-            await asyncio.wait_for(userbot.start(phone=CONFIG.tg_phone or None), USERBOT_START_TIMEOUT)
-        except asyncio.TimeoutError:
-            logger.error("userbot не подключился за %s с — выходим, launchd перезапустит", USERBOT_START_TIMEOUT)
-            raise SystemExit(1)
         runtime.userbot = userbot
-        with db.session() as conn:
-            alive_at = db.get_meta(conn, USERBOT_ALIVE_KEY)
-        tasks.append(catch_up_missed(userbot, alive_at))
-        tasks.append(backfill_lead_names(userbot))
-        tasks.append(userbot_heartbeat())
-        tasks.append(userbot.run_until_disconnected())
+        tasks.append(run_userbot_forever(userbot))
     else:
         logger.warning("TG_API_ID/TG_API_HASH не заданы — userbot не запущен")
 
@@ -558,6 +614,13 @@ async def main() -> None:
         tasks.append(agent_bot.agent_dp.start_polling(agent_bot.build_agent_bot()))
     else:
         logger.info("AGENT_BOT_TOKEN не задан — ТГ-агент не запущен")
+
+    # Диалоги продаж в личке VK: тот же продавец, транспорт — браузер (vk_messenger.py).
+    # Цикл крутится всегда и смотрит на VK_SALES_ENABLED на каждом тике (по умолчанию выкл).
+    import vk_messenger
+
+    tasks.append(vk_messenger.run_forever(vk_messenger.Hooks(process=process_lead_text,
+                                                             note_media=note_unanswered_media)))
 
     config = uvicorn.Config(crm_app, host=CONFIG.crm_host, port=CONFIG.crm_port, log_level="info")
     server = uvicorn.Server(config)

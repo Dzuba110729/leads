@@ -323,3 +323,55 @@ def test_vk_candidate_card_links_to_vk_profile(tmp_path, monkeypatch):
         out = json.loads(agent_bot._tool_list_recent_candidates(5, "new"))
     assert out[0]["author"] == "Ольга Петрова"
     assert out[0]["author_link"] == "https://vk.com/id13750322"
+
+
+# --- беседы VK ------------------------------------------------------------------------------
+
+def test_parse_vk_chat_links():
+    expected = ("vk", "https://vk.com/im/convo/2000000001")
+    assert agent_menu.parse_source_link("https://vk.com/im/convo/2000000001") == expected
+    assert agent_menu.parse_source_link("https://vk.ru/im/convo/2000000001?entrypoint=unknown&rp=peer2000000001") == expected
+    assert agent_menu.parse_source_link("vk.com/im?sel=c1") == expected
+    assert agent_menu.parse_source_link("https://vk.com/im?act=browse&sel=c5") == ("vk", "https://vk.com/im/convo/2000000005")
+    # личный диалог, пустой мессенджер и приглашение — не источники
+    assert agent_menu.parse_source_link("https://vk.com/im/convo/540851151") is None
+    assert agent_menu.parse_source_link("https://vk.com/im") is None
+    assert agent_menu.parse_source_link("https://vk.me/join/AJQ1d_abc") is None
+
+
+def test_vk_chat_invite_gets_hint_and_convo_link_is_added(tmp_path, monkeypatch):
+    _db(tmp_path, monkeypatch)
+    r = agent_menu.add_sources_from_text("https://vk.me/join/AJQ1d_abc https://vk.ru/im/convo/2000000002")
+    assert r["added"] == ["https://vk.com/im/convo/2000000002"]
+    assert r["invalid"] == ["https://vk.me/join/AJQ1d_abc"]
+    note = agent_menu.describe_added(r)
+    assert "вступите в беседу" in note and "vk.com/im/convo/" in note
+    # та же беседа старой ссылкой — дубль
+    assert agent_menu.add_sources_from_text("https://vk.com/im?sel=c2")["duplicates"] == ["https://vk.com/im/convo/2000000002"]
+
+
+def test_vk_chat_candidate_shows_chat_title(tmp_path, monkeypatch):
+    _db(tmp_path, monkeypatch)
+    url = "https://vk.com/im/convo/2000000001"
+    with db.session() as conn:
+        catcher_db.migrate(conn)
+        src = catcher_db.add_source(conn, "vk", url)
+        catcher_db.set_source_title(conn, src["id"], "Практические вопросы семейного образования")
+        mid = catcher_db.insert_raw_message(
+            conn, source_chat_id=src["id"], external_id="105640", author="Анна Орлова",
+            text="ищем онлайн-школу", url=f"{url}?msgid=105640",
+            posted_at="2026-09-30T07:49:00+03:00", author_username="id1243984",
+        )
+        catcher_db.add_candidate(conn, raw_message_id=mid, quote="ищем онлайн-школу", reason="ищет",
+                                 contact_url=None, opener_text="Здравствуйте")
+    text, kb = agent_menu.render_candidate(0)
+    urls = {b.text: b.url for row in kb.inline_keyboard for b in row if b.url}
+    assert urls["💬 Беседа VK"] == f"{url}?msgid=105640"
+    assert urls["👤 Написать в личку"] == "https://vk.com/id1243984"
+    text, _ = agent_menu.render_sources(pick=False)
+    assert "Практические вопросы семейного образования" in text
+    _, kb = agent_menu.render_sources(pick=True)
+    assert "Практические вопросы" in kb.inline_keyboard[0][0].text
+    out = json.loads(agent_bot._tool_list_recent_candidates(5, "new"))
+    assert out[0]["chat"] == "Практические вопросы семейного образования"
+    assert out[0]["chat_url"] == url

@@ -27,7 +27,13 @@ def is_auto_sent(chat_id: int, msg_id: int) -> bool:
 async def send_to_lead(userbot, tg_id: int, username: str | None, text: str):
     """Сообщение лиду с продающего аккаунта. По числовому id Telethon отправляет, только если уже
     видел этого человека в текущем запуске (StringSession не хранит кэш людей), иначе ValueError —
-    тогда шлём по @username. Отправленное помечается как автоответ, не как реплика менеджера."""
+    тогда шлём по @username. Отправленное помечается как автоответ, не как реплика менеджера.
+    Лид из VK (отрицательный tg_id, см. db.vk_tg_id) — в очередь браузерного поллера vk_messenger."""
+    if int(tg_id) < 0:
+        import vk_messenger
+
+        vk_messenger.queue_for_lead(tg_id, text)
+        return None
     try:
         message = await userbot.send_message(tg_id, text)
     except ValueError:

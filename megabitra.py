@@ -14,6 +14,7 @@ import re
 
 import httpx
 
+import db
 import pipeline
 from config import CONFIG
 
@@ -72,9 +73,13 @@ def normalize_phone(raw: str | None) -> str | None:
 
 
 def _comment(order, lead) -> str:
-    nick = f"@{lead['username']}" if lead["username"] else f"tg id {lead['tg_id']}"
+    if db.is_vk_lead(lead):
+        origin = f"Из VK ({db.vk_profile_url(lead)})"
+    else:
+        nick = f"@{lead['username']}" if lead["username"] else f"tg id {lead['tg_id']}"
+        origin = f"Из Telegram ({nick})"
     parts = [
-        f"Из Telegram ({nick}), заявка og1 №{order['id']}.",
+        f"{origin}, заявка og1 №{order['id']}.",
         f"Запрос: {order['summary'] or order['tariff']}.",
         f"Как связаться: {order['contact']}.",
     ]

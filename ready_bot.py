@@ -42,9 +42,13 @@ def _fmt_dt(value: str | None) -> str:
 
 
 def card_text(order, lead) -> str:
-    nick = f"@{lead['username']}" if lead["username"] else f"ID {lead['tg_id']}"
+    if db.is_vk_lead(lead):  # диалог в личке VK (vk_messenger.py)
+        link = db.vk_profile_url(lead)
+        nick = "VK " + link.removeprefix("https://")
+    else:
+        nick = f"@{lead['username']}" if lead["username"] else f"ID {lead['tg_id']}"
+        link = f"https://t.me/{lead['username']}" if lead["username"] else f"tg://user?id={lead['tg_id']}"
     who = f"{lead['name']} ({nick})" if lead["name"] else nick
-    link = f"https://t.me/{lead['username']}" if lead["username"] else f"tg://user?id={lead['tg_id']}"
     price = f"{order['price']:,.0f} ₽".replace(",", " ") if order["price"] else "по запросу"
     head = (
         f"🟢 <b>Готов к связи — заявка №{order['id']}</b>\n\n"

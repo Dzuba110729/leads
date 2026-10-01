@@ -32,6 +32,7 @@ import db
 import gdocs
 import runtime
 import vk_browser
+import vk_messenger
 from config import CONFIG, save_env_value
 
 logger = logging.getLogger(__name__)
@@ -133,6 +134,8 @@ def _score_badge(score: int | None) -> str:
 
 
 def _lead_name(lead) -> str:
+    if db.is_vk_lead(lead):
+        return f"VK · {lead['name'] or lead['vk_path'] or lead['vk_id']}"
     return f"@{lead['username']}" if lead["username"] else f"ID {lead['tg_id']}"
 
 
@@ -246,14 +249,16 @@ def render_lead_card(lead_id: int, note: str = "") -> tuple[str, InlineKeyboardM
     if info is None:
         return "Лид не найден.", _kb([_btn("« Лиды", "menu:leads")])
     lead, order = info["lead"], info["order"]
-    source = "группа" if lead["source"] == "group" else "личка"
+    source = "группа" if lead["source"] == "group" else ("личка VK" if db.is_vk_lead(lead) else "личка")
     parts = [
         f"<b>{_e(_lead_name(lead))}</b>",
         f"Балл: {_score_badge(lead['last_score'])} (оценён {_fmt_dt(lead['last_score_at'])})",
         f"Откуда: {source} · шаг прогрева: {lead['next_step_idx']}/3",
         f"Первый контакт: {_fmt_dt(lead['first_seen_at'])} · последнее сообщение: {_fmt_dt(lead['last_seen_at'])}",
     ]
-    if not lead["username"]:
+    if db.is_vk_lead(lead):
+        parts.append(f"Профиль VK: {_e(db.vk_profile_url(lead))}")
+    elif not lead["username"]:
         parts.append(f"Telegram-ID: <code>{lead['tg_id']}</code> (у человека нет username — найдите его в чатах аккаунта)")
     if order is not None:
         closed = " (закрыта)" if order["closed"] else ""
@@ -270,7 +275,9 @@ def render_lead_card(lead_id: int, note: str = "") -> tuple[str, InlineKeyboardM
     if note:
         parts.insert(0, note + "\n")
     rows = []
-    if lead["username"]:
+    if db.is_vk_lead(lead):
+        rows.append([_url_btn("✉️ Открыть диалог в VK", f"https://vk.com/im/convo/{lead['vk_id']}")])
+    elif lead["username"]:
         rows.append([_url_btn("✉️ Открыть в Telegram", f"https://t.me/{lead['username']}")])
     if order is not None:
         rows.append([_btn(f"📋 Заявка #{order['id']}", f"ord:{order['id']}")])
@@ -294,10 +301,25 @@ _awaiting_source: set[int] = set()
 VK_PREFIXES = ("vk.com/", "m.vk.com/", "vk.ru/", "m.vk.ru/")
 
 
+def _vk_chat_link(rest: str) -> str | None:
+    """Беседа VK: im/convo/2000000001 или старый вид im?sel=c1 → https://vk.com/im/convo/<peer_id>.
+    Личные диалоги (peer_id меньше 2e9) не берём — ловец читает только групповые беседы."""
+    m = re.match(r"im/convo/(\d+)", rest)
+    if m:
+        peer = int(m.group(1))
+    else:
+        m = re.match(r"im/?\?(?:.*&)?sel=c(\d+)", rest)
+        if not m:
+            return None
+        peer = vk_browser.CHAT_PEER_BASE + int(m.group(1))
+    return vk_browser.chat_url(peer) if peer > vk_browser.CHAT_PEER_BASE else None
+
+
 def parse_source_link(text: str) -> tuple[str, str] | None:
     """Ссылка/упоминание группы → (платформа, нормализованная ссылка на сам чат) или None.
-    Ссылку на сообщение (t.me/chat/123) сводим к чату; приглашения (t.me/+..., joinchat) не
-    поддерживаем — по ним служебный аккаунт не прочитает чат, пока в него не вступит."""
+    Ссылку на сообщение (t.me/chat/123) сводим к чату; приглашения (t.me/+..., joinchat,
+    vk.me/join/...) не поддерживаем — по ним служебный аккаунт не прочитает чат, пока в него не
+    вступит. Беседа VK — ссылка vk.com/im/convo/<peer_id> из браузера ловца, где он уже участник."""
     raw = text.strip().split()[0].strip(",;()<>\"'«»") if text.strip() else ""
     if raw.startswith("@") and len(raw) > 1:
         return "tg", f"https://t.me/{raw[1:]}"
@@ -310,7 +332,11 @@ def parse_source_link(text: str) -> tuple[str, str] | None:
             return "tg", f"https://t.me/{name}"
     for prefix in VK_PREFIXES:
         if link.startswith(prefix):
-            name = link[len(prefix):].split("/")[0].split("?")[0].split("#")[0]
+            rest = link[len(prefix):]
+            if rest == "im" or rest.startswith(("im/", "im?")):
+                chat = _vk_chat_link(rest)
+                return ("vk", chat) if chat else None
+            name = rest.split("/")[0].split("?")[0].split("#")[0]
             # Ссылка на пост (vk.com/wall-123_45) → само сообщество club123
             wall = re.fullmatch(r"wall-(\d+)_\d+", name)
             if wall:
@@ -320,7 +346,7 @@ def parse_source_link(text: str) -> tuple[str, str] | None:
 
 
 def _looks_like_link(token: str) -> bool:
-    return token.startswith("@") or any(m in token for m in ("t.me/", "telegram.me/", "vk.com/", "vk.ru/", "http"))
+    return token.startswith("@") or any(m in token for m in ("t.me/", "telegram.me/", "vk.com/", "vk.ru/", "vk.me/", "http"))
 
 
 def add_sources_from_text(text: str) -> dict[str, list[str]]:
@@ -360,6 +386,13 @@ def describe_added(result: dict[str, list[str]]) -> str:
             + "\n(нужна ссылка на открытую группу вида https://t.me/название или сообщество VK "
             "вида https://vk.com/название; ссылки-приглашения t.me/+... не подходят)"
         )
+        if any("vk.me/join" in t or "/im" in t for t in result["invalid"]):
+            parts.append(
+                "Беседа VK: ссылка-приглашение vk.me/join/… не подходит. Сначала вступите в беседу "
+                "аккаунтом ловца в его браузере (.venv/bin/python vk_browser_login.py), откройте беседу "
+                "и пришлите адрес из строки браузера вида https://vk.com/im/convo/2000000001. "
+                "Список бесед аккаунта со ссылками: .venv/bin/python vk_browser.py chats"
+            )
     return "\n".join(parts) or "Не нашёл в сообщении ни одной ссылки на чат."
 
 
@@ -403,6 +436,11 @@ def _page_nav(prefix: str, page: int, pages: int) -> list:
     return nav
 
 
+def _source_short(source) -> str:
+    label = catcher_db.source_label(source)
+    return label.replace("https://", "")
+
+
 def render_sources(pick: bool, page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
     with db.session() as conn:
         catcher_db.migrate(conn)
@@ -421,7 +459,7 @@ def render_sources(pick: bool, page: int = 0) -> tuple[str, InlineKeyboardMarkup
     chunk = list(enumerate(sources, 1))[first:first + SOURCES_PAGE_SIZE]
     if pick:
         rows = [
-            [_btn(f"{n}. {'TG' if s['platform'] == 'tg' else 'VK'} · {s['url'].replace('https://', '')[:40]}", f"cat:run:{s['id']}")]
+            [_btn(f"{n}. {'TG' if s['platform'] == 'tg' else 'VK'} · {_source_short(s)[:40]}", f"cat:run:{s['id']}")]
             for n, s in chunk
         ]
         nav = _page_nav("cat:pick", page, pages)
@@ -435,8 +473,10 @@ def render_sources(pick: bool, page: int = 0) -> tuple[str, InlineKeyboardMarkup
     for n, s in chunk:
         st = stats[s["id"]]
         state = "✅" if s["enabled"] else "⏸"
+        title = catcher_db.source_label(s)
+        title = "" if title == s["url"] else title
         lines.append(
-            f"{n}. {state} {_e(s['url'])}\n"
+            f"{n}. {state} {_e(title + ' — ' if title else '')}{_e(s['url'])}\n"
             f"    сообщений: {st['total'] or 0}, проверен: {_fmt_dt(s['last_checked_at'])}"
         )
         rows.append([_btn(
@@ -481,7 +521,11 @@ def render_candidate(offset: int, note: str = "", only_high: bool = False) -> tu
     vk = c["source_platform"] == "vk"
     links = []
     if c["message_url"]:
-        links.append(_url_btn("💬 Комментарий в VK" if vk else "💬 Сообщение в чате", c["message_url"]))
+        if vk and vk_browser.is_chat_url(c["message_url"]):
+            label = "💬 Беседа VK"
+        else:
+            label = "💬 Комментарий в VK" if vk else "💬 Сообщение в чате"
+        links.append(_url_btn(label, c["message_url"]))
     # tg://user не открывается кнопкой у всех, поэтому в личку — только по http-ссылке
     lead_link = catcher_db.author_link(c)
     if lead_link and lead_link.startswith("http"):
@@ -600,6 +644,8 @@ def system_status() -> dict:
         "catcher_tg": bool(CONFIG.catcher_tg_string_session),
         # VK читается через API по токену или браузером после vk_browser_login.py
         "vk": bool(CONFIG.vk_access_token) or vk_browser.session_ready(),
+        "vk_sales_enabled": CONFIG.vk_sales_enabled,
+        "vk_sales": vk_messenger.STATUS,
         "dry_run": CONFIG.dry_run,
         "scheduler_enabled": CONFIG.scheduler_enabled,
         "group_reply_mode": CONFIG.group_reply_mode,
@@ -607,6 +653,22 @@ def system_status() -> dict:
         "uptime_hours": round(uptime.total_seconds() / 3600, 1),
         "crm_url": f"http://{CONFIG.crm_host}:{CONFIG.crm_port}",
     }
+
+
+def _vk_sales_line(s: dict) -> str:
+    """Диалоги продаж в личке VK (vk_messenger.py): включены ли, когда был опрос, ошибки."""
+    st = s["vk_sales"]
+    if not s["vk_sales_enabled"]:
+        return "⚪ Диалоги в VK: выкл (VK_SALES_ENABLED=0 в .env)"
+    if st.halted:
+        return f"⛔ Диалоги в VK ОСТАНОВЛЕНЫ: {_e(st.halted)}"
+    line = f"✅ Диалоги в VK: опрос {_fmt_dt(st.last_poll_at) if st.last_poll_at else 'ещё не было'}"
+    line += f", лидов в белом списке: {st.dialogs}"
+    if st.skipped_busy:
+        line += f", пропущено тиков (браузер занят ловцом): {st.skipped_busy}"
+    if st.last_error:
+        line += f"\n   ⚠️ последняя ошибка: {_e(st.last_error[:200])}"
+    return line
 
 
 def render_system(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
@@ -625,6 +687,7 @@ def render_system(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
         f"{ok(s['llm'])} ИИ (Claude)",
         f"{ok(s['google_docs'])} Google Docs",
         f"{ok(s['catcher_tg'])} Ловец: Telegram · {ok(s['vk'])} VK",
+        _vk_sales_line(s),
         f"✅ CRM: {s['crm_url']}",
         f"Работает с {_fmt_dt(s['started_at'])} ({s['uptime_hours']} ч)\n",
         "<b>Режимы</b>",
@@ -635,7 +698,9 @@ def render_system(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
     ]
     if note:
         lines.insert(0, note + "\n")
+    extra = [[_btn("▶️ Возобновить VK", "sys:vkresume")]] if s["vk_sales"].halted else []
     kb = _kb(
+        *extra,
         [_btn("⏸ Выключить боевой режим" if not s["dry_run"] else "▶️ Включить боевой режим",
               f"sys:dry:{'on' if not s['dry_run'] else 'off'}")],
         [_btn("⏸ Выключить напоминания" if s["scheduler_enabled"] else "▶️ Включить напоминания",
@@ -864,7 +929,9 @@ async def cb_cat_add(cb: CallbackQuery) -> None:
         "Пришлите ссылку на <b>открытую</b> группу или канал — или сразу <b>список</b> "
         "(каждая ссылка с новой строки, через пробел или запятую):\n"
         "• Telegram: https://t.me/название или @название\n"
-        "• VK: https://vk.com/название (или vk.ru/название)\n\n"
+        "• VK: https://vk.com/название (или vk.ru/название)\n"
+        "• Беседа VK: https://vk.com/im/convo/2000000001 — адрес беседы из браузера ловца "
+        "(сначала вступите в неё этим аккаунтом; приглашение vk.me/join/… не подходит)\n\n"
         "Служебный аккаунт ловца должен иметь доступ к чату (для закрытых — вступить в него заранее).",
         _kb([_btn("Отмена", "cat:addcancel")]),
     ))
@@ -881,7 +948,7 @@ async def cb_cat_add_cancel(cb: CallbackQuery) -> None:
 async def on_source_link(message: Message) -> None:
     if not await _guard(message):
         return
-    if parse_source_link(message.text) is None and not any(m in message.text for m in ("t.me", "vk.com", "vk.ru", "@")):
+    if parse_source_link(message.text) is None and not any(m in message.text for m in ("t.me", "vk.com", "vk.ru", "vk.me", "@")):
         # Это не попытка прислать ссылку, а обычный вопрос — отдаём его свободному диалогу
         _awaiting_source.discard(message.chat.id)
         raise SkipHandler()
@@ -1013,6 +1080,16 @@ async def cb_sys_confirm(cb: CallbackQuery) -> None:
     _, kind, value = cb.data.split(":")
     text = TOGGLES[kind]["confirm"][value]
     await _show(cb, (text, _kb([_btn("✅ Да", f"sys:ok:{kind}:{value}"), _btn("Отмена", "menu:system")])))
+
+
+@router.callback_query(F.data == "sys:vkresume")
+async def cb_sys_vk_resume(cb: CallbackQuery) -> None:
+    """Оператор прошёл проверку VK в браузере — снова разрешаем отправку в личку VK."""
+    if not await _guard(cb):
+        return
+    vk_messenger.resume()
+    logger.warning("agent: VK sales resumed by %s", cb.from_user.id)
+    await _show(cb, render_system(note="▶️ Диалоги в VK возобновлены — со следующего опроса."))
 
 
 @router.callback_query(F.data.regexp(r"^sys:ok:(dry|sch):(on|off)$"))

@@ -62,6 +62,8 @@ ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "tg_peer_type": "TEXT",
         "tg_peer_id": "INTEGER",
         "tg_access_hash": "INTEGER",
+        # Название чата (для бесед VK — вместо ссылки vk.com/im/convo/… в списках и отчётах)
+        "title": "TEXT",
     },
     "raw_messages": {
         "processed": "INTEGER NOT NULL DEFAULT 0",
@@ -126,6 +128,11 @@ def delete_source(conn: sqlite3.Connection, source_id: int) -> None:
     conn.execute("DELETE FROM source_chats WHERE id = ?", (source_id,))
 
 
+def mark_checked(conn: sqlite3.Connection, source_id: int) -> None:
+    """Время обхода без сдвига курсора: VK-источник мог отдать 0 новых, а обход всё равно был."""
+    conn.execute("UPDATE source_chats SET last_checked_at = ? WHERE id = ?", (now(), source_id))
+
+
 def update_cursor(conn: sqlite3.Connection, source_id: int, last_message_id: str) -> None:
     conn.execute(
         "UPDATE source_chats SET last_message_id = ?, last_checked_at = ? WHERE id = ?",
@@ -139,6 +146,17 @@ def save_tg_peer(conn: sqlite3.Connection, source_id: int, peer_type: str, peer_
         (peer_type, peer_id, access_hash, source_id),
     )
     conn.commit()
+
+
+def set_source_title(conn: sqlite3.Connection, source_id: int, title: str) -> None:
+    conn.execute("UPDATE source_chats SET title = ? WHERE id = ?", (title, source_id))
+
+
+def source_label(source) -> str:
+    """Как назвать чат оператору: название, если знаем, иначе ссылка."""
+    title = _field(source, "title") or _field(source, "source_title")
+    url = _field(source, "url") or _field(source, "source_url") or ""
+    return title or url
 
 
 # --- raw_messages -------------------------------------------------------------
@@ -170,6 +188,14 @@ def insert_raw_message(
         return cur.lastrowid
     except sqlite3.IntegrityError:
         return None
+
+
+def recent_messages(conn: sqlite3.Connection, source_chat_id: int, limit: int) -> list[sqlite3.Row]:
+    """Последние сохранённые сообщения чата — в них ищем, на что отвечают в беседе VK."""
+    return conn.execute(
+        "SELECT external_id, author, text FROM raw_messages WHERE source_chat_id = ? ORDER BY id DESC LIMIT ?",
+        (source_chat_id, limit),
+    ).fetchall()
 
 
 def unprocessed_messages_for_source(conn: sqlite3.Connection, source_chat_id: int) -> list[sqlite3.Row]:
@@ -334,6 +360,7 @@ def list_candidates_for_export(
                raw_messages.author_username AS author_username,
                raw_messages.author_tg_id AS author_tg_id,
                source_chats.url AS source_url,
+               source_chats.title AS source_title,
                source_chats.platform AS source_platform
         FROM catch_candidates
         JOIN raw_messages ON raw_messages.id = catch_candidates.raw_message_id

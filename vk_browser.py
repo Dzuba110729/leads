@@ -17,14 +17,30 @@
 
 Темп человеческий: паузы со случайным разбросом, одна вкладка, не больше MAX_POSTS_OPENED
 открытых постов за обход — чтобы VK не пометил аккаунт как бота.
+
+Беседы VK (источник вида https://vk.com/im/convo/2000000001 — чат, в который аккаунт ловца уже
+вступил), проверено в живом веб-мессенджере 2026-09-30:
+- история — тоже виртуализированный список: вне экрана от сообщения остаётся пустая заглушка
+  `div.VirtualScrollItem[data-itemkey=<conversation_message_id>]`, более старые сообщения
+  подгружаются пачками по ~30, когда колесом мыши крутим вверх над `.ConvoHistory__scrollbar`;
+- сообщения одного автора подряд лежат в `section.ConvoStack`, шапка с автором — только у первого;
+- день — в разделителе `.DateSeparator[aria-label]` («сегодня», «вчера», «28 сентября») группы
+  `.ConvoHistory__dateStack`, у самого сообщения только время «07:49»;
+- служебные сообщения (вступил, закрепил) — `article.ServiceMessage`, их пропускаем;
+- ответ на сообщение — блок `[data-testid=vkme_replied_message]` с автором и обрезанным текстом
+  цитаты; id цитируемого сообщения в разметке нет, находим его по автору и началу текста.
+Беседа только читается: ни кликов, ни ввода. Новые сообщения в беседе только дописываются,
+поэтому курсор last_message_id (максимальный conversation_message_id) здесь работает.
 """
 from __future__ import annotations
 
 import logging
 import random
 import re
+import threading
 import time
 from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -52,6 +68,14 @@ COMMENTS_WAIT_MS = 8000
 COMMIT_EVERY = 100
 # Пояс браузера: в нём VK пишет «сегодня в 9:10», в нём же считаем «сейчас» при разборе дат
 VK_TIMEZONE = "Europe/Moscow"
+
+# Беседы
+CHAT_PEER_BASE = 2000000000  # peer_id беседы = 2e9 + номер чата у аккаунта
+MAX_CHAT_MESSAGES = 1500  # сообщений беседы за один обход
+MAX_CHAT_STEPS = 250  # шагов колеса вверх по истории — предохранитель
+IDLE_CHAT_STEPS = 8  # столько шагов подряд без новых сообщений — дошли до начала истории
+MAX_CHAT_DOWN_STEPS = 60  # вниз до самого свежего (VK может открыть беседу на первом непрочитанном)
+KNOWN_REPLY_TARGETS = 3000  # сколько уже сохранённых сообщений беседы брать для поиска цитат
 
 EXPANDER_RE = (
     r"^(Показать следующие комментарии|Показать предыдущие комментарии"
@@ -84,6 +108,65 @@ def profile_dir() -> Path:
 def session_ready() -> bool:
     """Оператор уже входил через vk_browser_login.py (живость сессии проверяется при обходе)."""
     return (profile_dir() / LOGIN_MARKER).exists()
+
+
+
+# --- один владелец профиля на процесс ------------------------------------------------------------
+# Chromium не открывает один профиль дважды, а профиль общий у ловца (обход сообществ/бесед в
+# потоке catcher_service) и у диалогов продаж в личке (vk_messenger). Поэтому браузер открывается
+# только под этим замком. Диалоги с лидами важнее обхода: их поток ждёт «с приоритетом» — обход
+# открывает браузер на каждый источник отдельно, и между источниками замок уходит диалогам.
+
+class ProfileBusy(RuntimeError):
+    pass
+
+
+class _ProfileLock:
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._held_by: str | None = None
+        self._priority_waiting = 0
+
+    @property
+    def holder(self) -> str | None:
+        return self._held_by
+
+    def acquire(self, owner: str, priority: bool = False, timeout: float | None = None) -> bool:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._cond:
+            if priority:
+                self._priority_waiting += 1
+            try:
+                # обычный захват уступает ждущим с приоритетом
+                while self._held_by is not None or (not priority and self._priority_waiting):
+                    left = None if deadline is None else deadline - time.monotonic()
+                    if left is not None and left <= 0:
+                        return False
+                    self._cond.wait(left)
+                self._held_by = owner
+                return True
+            finally:
+                if priority:
+                    self._priority_waiting -= 1
+
+    def release(self) -> None:
+        with self._cond:
+            self._held_by = None
+            self._cond.notify_all()
+
+
+PROFILE_LOCK = _ProfileLock()
+
+
+@contextmanager
+def profile_lock(owner: str, priority: bool = False, timeout: float | None = None):
+    """Держит профиль браузера на время блока. Не дождались за timeout — ProfileBusy."""
+    if not PROFILE_LOCK.acquire(owner, priority=priority, timeout=timeout):
+        raise ProfileBusy(f"VK: браузер занят ({PROFILE_LOCK.holder})")
+    try:
+        yield
+    finally:
+        PROFILE_LOCK.release()
 
 
 # --- даты -----------------------------------------------------------------------------------
@@ -258,6 +341,135 @@ def comment_rows(post_key: str, comments: list[dict], group_name: str | None, gr
     return rows
 
 
+# --- беседы: DOM → строки raw_messages -------------------------------------------------------
+
+def is_chat_url(url: str) -> bool:
+    return "/im/convo/" in (url or "")
+
+
+def chat_peer_id(url: str) -> int | None:
+    m = re.search(r"/im/convo/(\d+)", url or "")
+    return int(m.group(1)) if m else None
+
+
+def chat_url(peer_id: int) -> str:
+    return f"https://vk.com/im/convo/{peer_id}"
+
+
+def chat_message_url(peer_id: int, message_id: int | str) -> str:
+    # Публичной ссылки на сообщение беседы у VK нет — ссылка просто открывает беседу оператору
+    return f"{chat_url(peer_id)}?msgid={message_id}"
+
+
+def chat_day(label: str, now: datetime) -> datetime | None:
+    """Разделитель дней истории («сегодня», «вчера», «28 сентября», «5 октября 2025») → полночь."""
+    day = parse_vk_date(label, now)
+    return day.replace(hour=0, minute=0, second=0, microsecond=0) if day else None
+
+
+def chat_message_time(day_label: str, hhmm: str, now: datetime) -> datetime | None:
+    day = chat_day(day_label, now)
+    if day is None:
+        return None
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", (hhmm or "").strip())
+    if not m:
+        return day
+    return day.replace(hour=int(m.group(1)), minute=int(m.group(2)))
+
+
+def _norm(text: str) -> str:
+    return " ".join((text or "").replace("\xa0", " ").split()).lower()
+
+
+def resolve_reply(reply_author: str, reply_text: str, before_id: int, pool: list[dict]) -> str | None:
+    """id сообщения, на которое ответили: в разметке цитаты есть только автор и обрезанный текст,
+    поэтому ищем самое позднее более раннее сообщение того же автора, текст которого так начинается.
+    pool — [{external_id, author, text}] из этого обхода и уже сохранённых."""
+    author = _norm(reply_author)
+    preview = _norm(reply_text).rstrip("…").rstrip(".").strip()
+    if not author or not preview:
+        return None
+    best = None
+    for m in pool:
+        mid = int(m["external_id"])
+        if mid >= before_id or _norm(m.get("author") or "") != author:
+            continue
+        text = _norm(m.get("text") or "")
+        if not text or not (text.startswith(preview) or preview.startswith(text)):
+            continue
+        if best is None or mid > best:
+            best = mid
+    return str(best) if best is not None else None
+
+
+def fill_stack_authors(items: list[dict]) -> list[dict]:
+    """Шапка с автором есть только у первого сообщения стопки — раздаём её остальным.
+    Первое сообщение может быть уже заглушкой, поэтому смотрим на любое сообщение стопки с автором."""
+    by_stack: dict[str, tuple[str, str]] = {}
+    for it in sorted(items, key=lambda x: int(x["key"])):
+        if it.get("author") and it.get("stack"):
+            by_stack.setdefault(it["stack"], (it["author"], it.get("author_href") or ""))
+    out = []
+    for it in items:
+        if not it.get("author") and it.get("stack") in by_stack:
+            author, href = by_stack[it["stack"]]
+            it = {**it, "author": author, "author_href": it.get("author_href") or href}
+        out.append(it)
+    return out
+
+
+def chat_rows(items: list[dict], peer_id: int, now: datetime, cutoff: datetime,
+              after_id: int = 0, known: list[dict] | None = None) -> list[dict]:
+    """Собранные из истории беседы сообщения → аргументы insert_raw_message.
+    Пропускает служебные, пустые (стикер, голосовое без текста), уже виденные (id <= after_id)
+    и старше отсечки. items: {key, stack, day, time, author, author_href, text, reply_author,
+    reply_text, service}."""
+    items = fill_stack_authors([it for it in items if str(it.get("key", "")).isdigit()])
+    unique: dict[int, dict] = {}
+    for it in items:
+        unique.setdefault(int(it["key"]), it)
+    ordered = [unique[k] for k in sorted(unique)]
+    pool = [{"external_id": str(k), "author": it.get("author"), "text": it.get("text")}
+            for k, it in unique.items() if not it.get("service") and (it.get("text") or "").strip()]
+    pool += list(known or [])
+
+    rows = []
+    for it in ordered:
+        key = int(it["key"])
+        text = (it.get("text") or "").strip()
+        if it.get("service") or key <= after_id or not text:
+            continue
+        posted = chat_message_time(it.get("day", ""), it.get("time", ""), now)
+        if posted is not None and posted < cutoff:
+            continue
+        author_path = _profile_path(it.get("author_href", ""))
+        reply_to = None
+        if it.get("reply_author") or it.get("reply_text"):
+            reply_to = resolve_reply(it.get("reply_author", ""), it.get("reply_text", ""), key, pool)
+        rows.append({
+            "external_id": str(key),
+            "author": (it.get("author") or "").strip() or None,
+            "author_username": author_path or None,
+            "text": text,
+            "url": chat_message_url(peer_id, key),
+            "posted_at": posted.isoformat() if posted else None,
+            "reply_to_external_id": reply_to,
+        })
+    return rows
+
+
+def chat_reached_stop(items: list[dict], now: datetime, cutoff: datetime, after_id: int) -> bool:
+    """Листать выше незачем: дошли до уже виденного (курсор) или до сообщений старше отсечки."""
+    keyed = [it for it in items if str(it.get("key", "")).isdigit()]
+    if not keyed:
+        return False
+    oldest = min(keyed, key=lambda it: int(it["key"]))
+    if after_id and int(oldest["key"]) <= after_id:
+        return True
+    day = chat_day(oldest.get("day", ""), now)
+    return day is not None and day + timedelta(days=1) <= cutoff
+
+
 # --- браузер ---------------------------------------------------------------------------------
 
 # Посты стены в накопитель window.__og1Posts: стена виртуализирована, ушедшие из экрана посты
@@ -342,6 +554,93 @@ MARK_EXPANDERS_JS = r"""
     el.setAttribute('data-og1-exp', String(n++));
   }
   return n;
+}
+"""
+
+
+# Сообщения истории беседы в накопитель window.__og1Chat (история виртуализирована, как стена).
+# Берём только числовые data-itemkey внутри основной области: в списке чатов слева ключи вида
+# «convo_2000000001». Только чтение DOM.
+COLLECT_CHAT_JS = r"""
+() => {
+  const main = document.querySelector('[data-testid=me_main_content]');
+  const store = window.__og1Chat || (window.__og1Chat = {});
+  if (!main) return {items: Object.values(store), title: '', ready: false};
+  const NOT_OWN = '[data-testid=vkme_replied_message], [data-testid=vkme_pinned_message_banner], [class*=AttachWall], .Attachments';
+  const textOf = el => {
+    if (!el) return '';
+    let out = '';
+    const walk = n => {
+      for (const ch of n.childNodes) {
+        if (ch.nodeType === 3) out += ch.textContent;
+        else if (ch.nodeType !== 1) continue;
+        else if (ch.tagName === 'IMG') out += ch.getAttribute('alt') || '';  // эмодзи — картинки с alt
+        else if (ch.tagName === 'BR') out += '\n';
+        else if (ch.classList.contains('MessagePreview__attach')) continue;  // «2 фотографии» в цитате
+        else walk(ch);
+      }
+    };
+    walk(el);
+    return out.replace(/ /g, ' ').replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').trim();
+  };
+  for (const item of main.querySelectorAll('.VirtualScrollItem[data-itemkey]')) {
+    const key = item.getAttribute('data-itemkey') || '';
+    if (!/^\d+$/.test(key)) continue;
+    const art = item.querySelector('article');
+    if (!art) continue;  // заглушка виртуального списка
+    const own = sel => [...item.querySelectorAll(sel)].find(e => !e.closest(NOT_OWN));
+    const stack = item.closest('section.ConvoStack');
+    const first = stack && stack.querySelector('.VirtualScrollItem[data-itemkey]');
+    const dayBox = item.closest('.ConvoHistory__dateStack');
+    const sep = dayBox && dayBox.querySelector('.DateSeparator');
+    const header = own('a.ConvoMessageHeader__authorLink');
+    const avatar = own('a[class*="__avatar"]');
+    const title = header && header.querySelector('.PeerTitle__title');
+    const reply = item.querySelector('[data-testid=vkme_replied_message]');
+    const dateEl = own('[class*="MessageInfo"] [class*="__date"]');
+    const msg = {
+      key: key,
+      stack: first ? first.getAttribute('data-itemkey') : '',
+      day: sep ? (sep.getAttribute('aria-label') || sep.textContent || '').trim() : '',
+      time: dateEl ? dateEl.textContent.trim() : '',
+      author: title ? title.textContent.trim() : (header ? header.textContent.trim() : ''),
+      author_href: header ? (header.getAttribute('href') || '') : (avatar ? (avatar.getAttribute('href') || '') : ''),
+      text: textOf(own('[class*="__text"] .MessageText') || own('.MessageText')),
+      reply_author: reply ? textOf(reply.querySelector('[data-testid=vkme_replied_message_author]')) : '',
+      reply_text: reply ? textOf(reply.querySelector('[data-testid=vkme_replied_message_content]')) : '',
+      service: art.classList.contains('ServiceMessage'),
+      // для диалогов продаж (vk_messenger): вложение без текста и классы — направление сообщения
+      media: !!item.querySelector('.Attachments, [class*="Sticker"], [class*="AudioMsg"], [class*="AudioMessage"], [class*="Attach"]:not([class*="AttachWall"])'),
+      cls: (art.className || '') + ' ' + (stack ? (stack.className || '') : ''),
+    };
+    const prev = store[key];
+    if (!prev) { store[key] = msg; continue; }
+    for (const f of ['stack', 'day', 'time', 'author', 'author_href', 'reply_author', 'reply_text', 'cls'])
+      if (msg[f] && !prev[f]) prev[f] = msg[f];
+    if (msg.text.length > prev.text.length) prev.text = msg.text;
+    if (msg.media) prev.media = true;
+  }
+  const h = main.querySelector('.ConvoTitle__author');
+  const sc = main.querySelector('.ConvoHistory__scrollbar');
+  return {
+    items: Object.values(store),
+    title: h ? (h.getAttribute('title') || h.textContent || '').trim() : '',
+    ready: !!main.querySelector('.ConvoHistory__flow'),
+    atBottom: sc ? sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 5 : true,
+  };
+}
+"""
+
+# Беседы аккаунта из списка чатов слева (тоже виртуализирован — собираем по шагам колеса).
+LIST_CHATS_JS = r"""
+() => {
+  const store = window.__og1Chats || (window.__og1Chats = {});
+  for (const b of document.querySelectorAll('[data-testid=vkme_convo_list_item][data-peer-id]')) {
+    const peer = b.getAttribute('data-peer-id');
+    const h = b.querySelector('.ConvoTitle__author');
+    if (peer && h) store[peer] = (h.getAttribute('title') || h.textContent || '').trim();
+  }
+  return store;
 }
 """
 
@@ -450,7 +749,10 @@ def _insert(conn, source_id: int, rows: list[dict], counter: list[int]) -> None:
 
 def fetch_new_messages(conn, source) -> int:
     """Посты сообщества за CATCHER_MAX_MESSAGE_AGE_DAYS и комментарии под ними. Синхронный
-    Playwright: catcher_service зовёт VK-выгрузку через asyncio.to_thread, в потоке без event loop."""
+    Playwright: catcher_service зовёт VK-выгрузку через asyncio.to_thread, в потоке без event loop.
+    Беседы (vk.com/im/convo/…) читаются отдельно — fetch_chat_messages."""
+    if is_chat_url(source["url"]):
+        return fetch_chat_messages(conn, source)
     if not session_ready():
         raise RuntimeError(NOT_LOGGED_IN)
     from playwright.sync_api import Error as PlaywrightError
@@ -461,7 +763,7 @@ def fetch_new_messages(conn, source) -> int:
     slug = group_short_name(source["url"])
     fetched = [0]
     try:
-        with sync_playwright() as p:
+        with profile_lock("ловец: сообщество"), sync_playwright() as p:
             context = open_context(p, headless=True)
             try:
                 page = context.pages[0] if context.pages else context.new_page()
@@ -500,3 +802,163 @@ def fetch_new_messages(conn, source) -> int:
     except PlaywrightError as exc:
         raise RuntimeError(f"VK: браузер не справился ({str(exc).splitlines()[0]})") from exc
     return fetched[0]
+
+
+# --- беседы: браузер ---------------------------------------------------------------------------
+
+def _max_key(items: list[dict]) -> int:
+    return max((int(it["key"]) for it in items if str(it.get("key", "")).isdigit()), default=0)
+
+
+def _collect_chat(page, now: datetime, cutoff: datetime, after_id: int,
+                  max_messages: int = MAX_CHAT_MESSAGES) -> tuple[list[dict], str]:
+    """Листает историю открытой беседы колесом: сначала вниз до самого свежего сообщения, потом
+    вверх, пока не упрёмся в курсор, отсечку по дате, лимит или начало истории. Только чтение."""
+    state = page.evaluate(COLLECT_CHAT_JS)
+    box = page.locator("[data-testid=me_main_content] .ConvoHistory__scrollbar").first.bounding_box()
+    if box:
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+
+    # VK может открыть беседу на первом непрочитанном — тогда свежие сообщения ниже экрана
+    stable = 0
+    for _ in range(MAX_CHAT_DOWN_STEPS):
+        before = _max_key(state["items"])
+        if state.get("atBottom"):
+            stable += 1
+            if stable >= 2:
+                break
+        page.mouse.wheel(0, random.randint(1300, 1700))
+        _pause(1.0, 0.8)
+        state = page.evaluate(COLLECT_CHAT_JS)
+        if _max_key(state["items"]) != before:
+            stable = 0
+
+    idle = 0
+    count = len(state["items"])
+    reason = "лимит шагов"
+    for _ in range(MAX_CHAT_STEPS):
+        items = state["items"]
+        messages = sum(1 for it in items if not it.get("service"))
+        if chat_reached_stop(items, now, cutoff, after_id):
+            reason = "дошли до прошлого обхода или отсечки по дате"
+            break
+        if messages >= max_messages:
+            reason = f"лимит {max_messages} сообщений"
+            break
+        if idle >= IDLE_CHAT_STEPS:
+            reason = "история не подгружается (начало беседы?)"
+            break
+        # Шаг меньше видимого окна (~25 сообщений), чтобы соседние снимки перекрывались
+        page.mouse.wheel(0, -random.randint(1100, 1500))
+        _pause(1.2, 1.0)
+        state = page.evaluate(COLLECT_CHAT_JS)
+        idle = idle + 1 if len(state["items"]) == count else 0
+        count = len(state["items"])
+    logger.info("VK: беседа %s — собрано %s, остановились: %s", state.get("title"), len(state["items"]), reason)
+    return state["items"], state.get("title") or ""
+
+
+def _open_chat(page, peer_id: int) -> None:
+    page.goto(chat_url(peer_id), wait_until="domcontentloaded", timeout=30000)
+    if not _wait_selector(page, "[data-testid=me_main_content] .ConvoHistory__flow", 20000) \
+            or f"/im/convo/{peer_id}" not in page.url:
+        raise RuntimeError(
+            f"VK: беседа {chat_url(peer_id)} не открылась — аккаунт ловца в ней не состоит "
+            "или ссылка неверная (вступите в беседу в браузере ловца и пришлите ссылку заново)"
+        )
+    page.wait_for_timeout(2000 + random.randint(0, 1500))
+
+
+def crawl_chat(peer_id: int, after_id: int = 0, max_messages: int = MAX_CHAT_MESSAGES) -> tuple[list[dict], str, datetime]:
+    """Сырые сообщения беседы (без записи в базу) + её название + «сейчас» для разбора дат."""
+    if not session_ready():
+        raise RuntimeError(NOT_LOGGED_IN)
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
+
+    now = datetime.now(ZoneInfo(VK_TIMEZONE))
+    cutoff = now - timedelta(days=CONFIG.catcher_max_message_age_days)
+    try:
+        with profile_lock("ловец: беседа"), sync_playwright() as p:
+            context = open_context(p, headless=True)
+            try:
+                page = context.pages[0] if context.pages else context.new_page()
+                if not is_logged_in(page):
+                    raise RuntimeError(NOT_LOGGED_IN)
+                _pause(1.0, 1.5)
+                _open_chat(page, peer_id)
+                items, title = _collect_chat(page, now, cutoff, after_id, max_messages)
+            finally:
+                context.close()
+    except PlaywrightError as exc:
+        raise RuntimeError(f"VK: браузер не справился ({str(exc).splitlines()[0]})") from exc
+    return items, title, now
+
+
+def fetch_chat_messages(conn, source) -> int:
+    """Новые сообщения беседы VK с прошлого обхода (курсор — максимальный id сообщения беседы),
+    при первом обходе — за CATCHER_MAX_MESSAGE_AGE_DAYS, но не больше MAX_CHAT_MESSAGES."""
+    peer_id = chat_peer_id(source["url"])
+    if peer_id is None:
+        raise RuntimeError(f"VK: в ссылке {source['url']} нет номера беседы")
+    after_id = int(source["last_message_id"]) if (source["last_message_id"] or "").isdigit() else 0
+    items, title, now = crawl_chat(peer_id, after_id)
+    cutoff = now - timedelta(days=CONFIG.catcher_max_message_age_days)
+
+    known = [dict(r) for r in catcher_db.recent_messages(conn, source["id"], KNOWN_REPLY_TARGETS)]
+    fetched = [0]
+    _insert(conn, source["id"], chat_rows(items, peer_id, now, cutoff, after_id, known), fetched)
+    if title:
+        catcher_db.set_source_title(conn, source["id"], title)
+    newest = _max_key(items)
+    if newest > after_id:
+        catcher_db.update_cursor(conn, source["id"], str(newest))
+    conn.commit()
+    return fetched[0]
+
+
+def list_joined_chats(max_steps: int = 15) -> list[tuple[int, str]]:
+    """Беседы, в которых состоит аккаунт ловца: [(peer_id, название)] — чтобы узнать ссылку
+    https://vk.com/im/convo/<peer_id> для добавления в ловец. Только чтение списка чатов."""
+    if not session_ready():
+        raise RuntimeError(NOT_LOGGED_IN)
+    from playwright.sync_api import sync_playwright
+
+    with profile_lock("список бесед"), sync_playwright() as p:
+        context = open_context(p, headless=True)
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            if not is_logged_in(page):
+                raise RuntimeError(NOT_LOGGED_IN)
+            page.goto("https://vk.com/im", wait_until="domcontentloaded", timeout=30000)
+            if not _wait_selector(page, "[data-testid=vkme_convo_list_item]", 20000):
+                return []
+            page.wait_for_timeout(1500)
+            box = page.locator("[data-testid=vkme_convo_list_item]").first.bounding_box()
+            if box:
+                page.mouse.move(box["x"] + box["width"] / 2, box["y"] + 200)
+            found: dict = {}
+            idle = 0
+            for _ in range(max_steps):
+                current = page.evaluate(LIST_CHATS_JS)
+                idle = idle + 1 if len(current) == len(found) else 0
+                found = current
+                if idle >= 3:
+                    break
+                page.mouse.wheel(0, random.randint(700, 900))
+                _pause(0.8, 0.6)
+        finally:
+            context.close()
+    chats = [(int(peer), title) for peer, title in found.items() if peer.isdigit() and int(peer) > CHAT_PEER_BASE]
+    return sorted(chats)
+
+
+if __name__ == "__main__":
+    # .venv/bin/python vk_browser.py chats — беседы аккаунта ловца со ссылками для «➕ Добавить чат».
+    # Не запускать, пока идёт обход: профиль браузера нельзя открыть дважды.
+    import sys
+
+    if sys.argv[1:] != ["chats"]:
+        raise SystemExit("использование: .venv/bin/python vk_browser.py chats")
+    for peer, title in list_joined_chats():
+        print(f"{chat_url(peer)}  {title}")

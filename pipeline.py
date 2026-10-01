@@ -74,6 +74,12 @@ CALL_REQUEST_TEXT = (
 CALL_REQUEST_AGAIN_TEXT = "Подскажите, пожалуйста, номер телефона и удобное время, чтобы специалист с Вами связался."
 PHONE_NUMBER_REQUEST_TEXT = "Хорошо, напишите, пожалуйста, номер телефона, по которому Вам удобно позвонить."
 ALTERNATIVES_TEXT = "Хорошо, тогда можно связаться здесь, в тг, или по почте - как Вам удобнее?"
+# Тот же вопрос лиду, который пишет в личку VK (vk_messenger.py): «здесь» — это ВК, а не тг.
+ALTERNATIVES_TEXT_VK = "Хорошо, тогда можно связаться здесь, в ВК, или по почте - как Вам удобнее?"
+
+
+def alternatives_text(platform: str = "tg") -> str:
+    return ALTERNATIVES_TEXT_VK if platform == "vk" else ALTERNATIVES_TEXT
 EMAIL_REQUEST_TEXT = "Хорошо, напишите, пожалуйста, адрес почты."
 CONTACT_THANKS_TEXT = "Хорошо, передаю Ваши контакты специалисту по данному направлению, он с Вами свяжется."
 
@@ -86,12 +92,12 @@ PHONE_REFUSAL_MARKERS = (
 
 # Мессенджеры и почта: способ связи без номера телефона.
 _MESSENGER_MARKERS = ("телеграм", "telegram", "тг", "здесь", "сюда", "ватсап", "вотсап", "вацап",
-                      "whatsapp", "вайбер", "viber", "max", "почт", "email", "e-mail")
+                      "whatsapp", "вайбер", "viber", "max", "почт", "email", "e-mail", "вконтакт", "в вк")
 
 # Ответ на «когда и где удобно связаться» без номера: канал связи или время.
 CONTACT_MARKERS = (
     "телеграм", "telegram", "тг", "здесь", "сюда", "в этом чате", "в личк",
-    "ватсап", "вотсап", "вацап", "whatsapp", "вайбер", "viber", "max",
+    "ватсап", "вотсап", "вацап", "whatsapp", "вайбер", "viber", "max", "вконтакт", "в вк",
     "звон", "номер", "почт", "email", "e-mail",
     "утр", "днём", "днем", "вечер", "обед", "после", "будн", "выходн", "завтра", "сегодня",
     "понедельник", "вторник", "сред", "четверг", "пятниц", "суббот", "воскресен", "любое время",
@@ -114,7 +120,7 @@ def contact_step(text: str, dialog_context: str) -> str | None:
         return None
     if extract_phone(text) or EMAIL_RE.search(text):
         return "done"
-    offered = ALTERNATIVES_TEXT in (dialog_context or "")
+    offered = ALTERNATIVES_TEXT in (dialog_context or "") or ALTERNATIVES_TEXT_VK in (dialog_context or "")
     if refuses_phone:
         return "done" if offered else "offer_alternatives"
     if _mentions(text, ("почт", "email", "e-mail", "мейл", "имейл")):

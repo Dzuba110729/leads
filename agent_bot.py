@@ -273,7 +273,8 @@ def _tool_list_recent_candidates(limit: int, status: str) -> str:
         out.append({
             "author": catcher_db.author_label(c),
             "author_link": catcher_db.author_link(c),
-            "chat": c["source_url"],
+            "chat": catcher_db.source_label(c),
+            "chat_url": c["source_url"],
             "quote": c["quote"],
             "reason": c["reason"],
             "status": c["status"],
@@ -379,7 +380,9 @@ async def _catcher_job(bot: Bot, chat_id: int, source_ids: list[int], export: bo
         total_new = 0
         for r in results:
             name = r.url.replace("https://", "")
-            if r.error:
+            if r.skipped:
+                lines.append(f"— {name}: пропущен ({r.skipped})")
+            elif r.error:
                 lines.append(f"— {name}: ошибка ({r.error})")
             else:
                 line = f"— {name}: выгружено {r.fetched}, новых лидов {r.new_candidates}"

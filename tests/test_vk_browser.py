@@ -141,3 +141,134 @@ def test_no_session_fails_fast_with_hint(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="vk_browser_login.py"):
         catcher_vk.fetch_new_messages(None, {"id": 1, "url": "https://vk.com/ourhomeedu", "last_message_id": None})
+
+
+# --- беседы ------------------------------------------------------------------------------------
+
+PEER = 2000000001
+
+
+def _chat_items():
+    """Как их отдаёт COLLECT_CHAT_JS: шапка с автором только у первого сообщения стопки."""
+    base = {"reply_author": "", "reply_text": "", "service": False, "author": "", "author_href": ""}
+    return [
+        {**base, "key": "100", "stack": "100", "day": "28 сентября", "time": "10:00",
+         "author": "Очень старый", "author_href": "/id1", "text": "было давно"},
+        {**base, "key": "105640", "stack": "105640", "day": "вчера", "time": "07:49",
+         "author": "Анна Тамбовцева", "author_href": "/a_tambovtseva",
+         "text": "Доброе утро. Подскажите, пожалуйста, где можно найти эти учебники в электронном виде бесплатно?"},
+        {**base, "key": "105641", "stack": "105641", "day": "вчера", "time": "07:54",
+         "author": "Евлампий Бужеле", "author_href": "/svetik0374", "text": "Здравствуйте!\n11klassov.net смотрите))",
+         "reply_author": "Анна Тамбовцева",
+         "reply_text": "Доброе утро. Подскажите, пожалуйста, где можно найти эти учебники в электр…"},
+        {**base, "key": "105642", "stack": "105642", "day": "сегодня", "time": "",
+         "text": "", "service": True},  # «присоединился к чату»
+        {**base, "key": "105647", "stack": "105647", "day": "сегодня", "time": "09:16",
+         "author": "Марина Трапезникова", "author_href": "/maredress", "text": "Промокод при оплате группой?"},
+        # второе сообщение стопки — без шапки
+        {**base, "key": "105648", "stack": "105647", "day": "сегодня", "time": "09:17",
+         "text": "Кэшбек не прошёл 😢"},
+        {**base, "key": "105649", "stack": "105649", "day": "сегодня", "time": "09:20",
+         "author": "Полина", "author_href": "/id5", "text": ""},  # стикер
+        {**base, "key": "105650", "stack": "105650", "day": "сегодня", "time": "09:52",
+         "author": "Семейное образование", "author_href": "/onfaed", "text": "Промокод личный",
+         "reply_author": "Марина Трапезникова", "reply_text": "Кто-то другой"},  # цитата не нашлась
+    ]
+
+
+def test_chat_link_helpers():
+    assert vk_browser.is_chat_url("https://vk.com/im/convo/2000000001")
+    assert not vk_browser.is_chat_url("https://vk.com/onfaed")
+    assert vk_browser.chat_peer_id("https://vk.com/im/convo/2000000003") == 2000000003
+    assert vk_browser.chat_message_url(PEER, 5) == "https://vk.com/im/convo/2000000001?msgid=5"
+
+
+@pytest.mark.parametrize("label, hhmm, expected", [
+    ("сегодня", "07:49", NOW.replace(hour=7, minute=49)),
+    ("вчера", "23:05", (NOW - timedelta(days=1)).replace(hour=23, minute=5)),
+    ("28 сентября", "10:00", NOW.replace(day=28, hour=10, minute=0)),
+    ("5 октября 2025", "", NOW.replace(year=2025, month=10, day=5, hour=0, minute=0)),
+    ("25 декабря", "12:00", NOW.replace(year=2025, month=12, day=25, hour=12, minute=0)),
+    ("не дата", "12:00", None),
+])
+def test_chat_message_time(label, hhmm, expected):
+    assert vk_browser.chat_message_time(label, hhmm, NOW) == expected
+
+
+def test_chat_rows_map_messages():
+    cutoff = NOW - timedelta(days=1, hours=20)  # 28 сентября уже старше отсечки
+    rows = vk_browser.chat_rows(_chat_items(), PEER, NOW, cutoff)
+    assert [r["external_id"] for r in rows] == ["105640", "105641", "105647", "105648", "105650"]
+    by_id = {r["external_id"]: r for r in rows}
+    first = by_id["105640"]
+    assert first["author"] == "Анна Тамбовцева" and first["author_username"] == "a_tambovtseva"
+    assert first["url"] == "https://vk.com/im/convo/2000000001?msgid=105640"
+    assert first["posted_at"] == (NOW - timedelta(days=1)).replace(hour=7, minute=49).isoformat()
+    assert first["reply_to_external_id"] is None
+    # цитата найдена по автору и началу текста
+    assert by_id["105641"]["reply_to_external_id"] == "105640"
+    assert by_id["105641"]["text"] == "Здравствуйте!\n11klassov.net смотрите))"
+    # автор второго сообщения стопки — из шапки первого
+    assert by_id["105648"]["author"] == "Марина Трапезникова"
+    assert by_id["105648"]["author_username"] == "maredress"
+    assert by_id["105650"]["reply_to_external_id"] is None
+
+
+def test_chat_rows_skip_seen_but_resolve_replies_to_them():
+    rows = vk_browser.chat_rows(_chat_items(), PEER, NOW, CUTOFF, after_id=105640)
+    assert rows[0]["external_id"] == "105641"
+    assert rows[0]["reply_to_external_id"] == "105640"  # уже сохранено прошлым обходом
+    # цитируемое сообщение знаем только из базы
+    known = [{"external_id": "105600", "author": "Марина Трапезникова", "text": "Кто-то другой написал это"}]
+    rows = vk_browser.chat_rows(_chat_items(), PEER, NOW, CUTOFF, after_id=105649, known=known)
+    assert [(r["external_id"], r["reply_to_external_id"]) for r in rows] == [("105650", "105600")]
+
+
+def test_resolve_reply_picks_latest_earlier_match():
+    pool = [
+        {"external_id": "10", "author": "Анна", "text": "Спасибо"},
+        {"external_id": "12", "author": "Анна", "text": "Спасибо большое"},
+        {"external_id": "15", "author": "Анна", "text": "Спасибо"},  # позже ответа — не он
+        {"external_id": "11", "author": "Ольга", "text": "Спасибо"},
+    ]
+    assert vk_browser.resolve_reply("Анна", "Спасибо", 14, pool) == "12"
+    assert vk_browser.resolve_reply("Анна", "", 14, pool) is None  # в цитате только фото
+    assert vk_browser.resolve_reply("Пётр", "Спасибо", 14, pool) is None
+
+
+def test_chat_reached_stop():
+    items = _chat_items()[1:]
+    assert not vk_browser.chat_reached_stop(items, NOW, CUTOFF, 0)
+    assert vk_browser.chat_reached_stop(items, NOW, CUTOFF, 105640)  # дошли до курсора
+    assert vk_browser.chat_reached_stop(_chat_items(), NOW, NOW - timedelta(days=1), 0)  # 28 сентября старше
+    assert not vk_browser.chat_reached_stop([], NOW, CUTOFF, 0)
+
+
+def test_chat_crawl_stores_rows_and_moves_cursor(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    catcher_db.migrate(conn)
+    src = catcher_db.add_source(conn, "vk", "https://vk.com/im/convo/2000000001")
+    calls = []
+
+    def fake_crawl(peer_id, after_id=0, max_messages=0):
+        calls.append((peer_id, after_id))
+        items = [it for it in _chat_items() if int(it["key"]) > 1000]
+        return items, "Практические вопросы семейного образования", NOW
+
+    monkeypatch.setattr(vk_browser, "crawl_chat", fake_crawl)
+    monkeypatch.setattr(CONFIG, "vk_access_token", "есть-токен")  # беседы всё равно идут браузером
+    import catcher_vk
+
+    assert catcher_vk.fetch_new_messages(conn, catcher_db.get_source(conn, src["id"])) == 5
+    source = catcher_db.get_source(conn, src["id"])
+    assert source["last_message_id"] == "105650"  # максимальный id, служебные тоже считаются
+    assert source["title"] == "Практические вопросы семейного образования"
+    # второй обход идёт от курсора и ничего не дублирует
+    assert catcher_vk.fetch_new_messages(conn, source) == 0
+    assert calls == [(PEER, 0), (PEER, 105650)]
+
+    messages = catcher_db.unprocessed_messages_for_source(conn, src["id"])
+    reply_map = catcher_db.reply_targets(conn, src["id"], [m["reply_to_external_id"] for m in messages if m["reply_to_external_id"]])
+    batch = catcher_pipeline._format_batch(messages, reply_map)
+    assert "Евлампий Бужеле (в ответ на «Доброе утро. Подскажите" in batch

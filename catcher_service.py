@@ -8,10 +8,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 import catcher_db
 import catcher_pipeline
 import db
+from config import CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +27,21 @@ class SourceRunResult:
     error: str | None = None
     unprocessed: int = 0  # сообщения, до которых ИИ не добрался — разберутся при следующем обходе
     llm_problem: str | None = None
+    skipped: str | None = None  # источник сознательно не обходили (VK чаще раза в сутки)
+
+
+def vk_crawl_wait(last_checked_at: str | None, now: datetime | None = None) -> timedelta | None:
+    """Сколько ещё ждать до следующего обхода VK-источника; None — можно обходить."""
+    if not last_checked_at or CONFIG.vk_crawl_min_hours <= 0:
+        return None
+    try:
+        last = datetime.fromisoformat(last_checked_at)
+    except ValueError:
+        return None
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    left = last + timedelta(hours=CONFIG.vk_crawl_min_hours) - (now or datetime.now(timezone.utc))
+    return left if left > timedelta(0) else None
 
 
 async def run_source(source_id: int) -> SourceRunResult:
@@ -42,12 +59,22 @@ async def run_source(source_id: int) -> SourceRunResult:
             else:
                 import catcher_vk
 
+                wait = vk_crawl_wait(source["last_checked_at"])
+                if wait is not None:
+                    hours = int(wait.total_seconds() // 3600)
+                    minutes = int(wait.total_seconds() % 3600 // 60)
+                    return SourceRunResult(
+                        source_id, url, 0, 0,
+                        skipped=f"VK обходим не чаще раза в {CONFIG.vk_crawl_min_hours} ч, следующий через {hours} ч {minutes} мин",
+                    )
+
                 # sqlite3-соединение нельзя передавать в другой поток — открываем своё внутри
                 def _fetch_vk() -> int:
                     with db.session() as thread_conn:
                         return catcher_vk.fetch_new_messages(thread_conn, source)
 
                 fetched = await asyncio.to_thread(_fetch_vk)
+                catcher_db.mark_checked(conn, source_id)
         except Exception as exc:
             logger.exception("fetch failed for source %s", source_id)
             return SourceRunResult(source_id, url, 0, 0, error=f"выгрузка: {exc}")

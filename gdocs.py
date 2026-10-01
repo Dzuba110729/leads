@@ -126,7 +126,7 @@ def build_leads_document(candidates: list, title_suffix: str = "") -> tuple[str,
     for c in candidates:
         if c["source_url"] != current_source:
             current_source = c["source_url"]
-            b.line(f"Чат: {current_source}", heading="HEADING_2", link=current_source)
+            b.line(f"Чат: {catcher_db.source_label(c)}", heading="HEADING_2", link=current_source)
         n += 1
         author = catcher_db.author_label(c)
         maybe = " (под вопросом)" if c["confidence"] == "maybe" else ""

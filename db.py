@@ -74,6 +74,47 @@ SCHEMA: dict[str, str] = {
             created_at TEXT NOT NULL
         )
     """,
+    # Диалоги продаж в личке VK (vk_messenger.py). Путь профиля → числовой id (разрешается один раз).
+    "vk_peers": """
+        CREATE TABLE IF NOT EXISTS vk_peers (
+            path TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            resolved_at TEXT NOT NULL
+        )
+    """,
+    # Что уже видели в диалоге с лидом: last_cmid — последний разобранный conversation_message_id,
+    # preview — последняя строка списка диалогов (изменилась — есть что читать).
+    "vk_dialogs": """
+        CREATE TABLE IF NOT EXISTS vk_dialogs (
+            peer_id INTEGER PRIMARY KEY,
+            lead_id INTEGER REFERENCES leads(id),
+            last_cmid INTEGER NOT NULL DEFAULT 0,
+            preview TEXT,
+            updated_at TEXT
+        )
+    """,
+    # Что отправил сам бот: по этому списку исходящее бота отличаем от ручного сообщения
+    # менеджера, и по нему же считаем лимиты отправки.
+    "vk_sent": """
+        CREATE TABLE IF NOT EXISTS vk_sent (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            peer_id INTEGER NOT NULL,
+            cmid INTEGER,
+            text TEXT NOT NULL,
+            sent_at TEXT NOT NULL
+        )
+    """,
+    # Прогрев/напоминания VK-лидам: пишутся сюда и уходят браузером на ближайшем тике поллера.
+    "vk_outbox": """
+        CREATE TABLE IF NOT EXISTS vk_outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lead_id INTEGER NOT NULL REFERENCES leads(id),
+            text TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            sent_at TEXT,
+            error TEXT
+        )
+    """,
     "users": """
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,6 +138,9 @@ ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "declined_at": "TEXT",
         # имя из профиля Telegram (first_name + last_name) — для карточки готового лида
         "name": "TEXT",
+        # откуда лид: 'tg' или 'vk'. У VK-лида tg_id = -vk_id (колонка NOT NULL UNIQUE), см. vk_tg_id
+        "platform": "TEXT NOT NULL DEFAULT 'tg'",
+        "vk_id": "INTEGER", "vk_path": "TEXT",
     },
     "orders": {
         # что лид прислал в ответ на «номер и удобное время для звонка» (весь текст, как есть)
@@ -109,6 +153,7 @@ ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     "handoff": {},
     "meta": {},
     "agent_history": {},
+    "vk_peers": {}, "vk_dialogs": {}, "vk_sent": {}, "vk_outbox": {},
     "users": {},
 }
 
@@ -188,6 +233,47 @@ def get_or_create_lead(conn: sqlite3.Connection, tg_id: int, username: str | Non
     )
     return conn.execute("SELECT * FROM leads WHERE id = ?", (cur.lastrowid,)).fetchone()
 
+
+
+def vk_tg_id(vk_id: int) -> int:
+    """Лид из VK хранится в той же таблице leads: tg_id обязателен и уникален, поэтому для VK
+    это отрицательный id пользователя VK (у людей в Telegram id положительные)."""
+    return -abs(int(vk_id))
+
+
+def is_vk_lead(lead) -> bool:
+    try:
+        return lead["platform"] == "vk"
+    except (IndexError, KeyError):
+        return False
+
+
+def vk_profile_url(lead) -> str:
+    path = lead["vk_path"] or f"id{lead['vk_id']}"
+    return f"https://vk.com/{path}"
+
+
+def get_or_create_vk_lead(conn: sqlite3.Connection, vk_id: int, vk_path: str | None,
+                          name: str | None = None, touch: bool = True) -> sqlite3.Row:
+    """VK-лид по числовому id. touch=False — менеджер написал первым: last_seen_at не трогаем."""
+    tg_id = vk_tg_id(vk_id)
+    row = conn.execute("SELECT * FROM leads WHERE tg_id = ?", (tg_id,)).fetchone()
+    ts = now()
+    if row is None:
+        cur = conn.execute(
+            """INSERT INTO leads (tg_id, username, source, first_seen_at, last_seen_at, platform, vk_id, vk_path)
+               VALUES (?, NULL, 'dm', ?, ?, 'vk', ?, ?)""",
+            (tg_id, ts, ts, int(vk_id), vk_path),
+        )
+        row_id = cur.lastrowid
+    else:
+        row_id = row["id"]
+        if touch:
+            conn.execute("UPDATE leads SET last_seen_at = ? WHERE id = ?", (ts, row_id))
+        if vk_path:
+            conn.execute("UPDATE leads SET vk_path = ? WHERE id = ?", (vk_path, row_id))
+    set_lead_name(conn, row_id, name)
+    return conn.execute("SELECT * FROM leads WHERE id = ?", (row_id,)).fetchone()
 
 
 def display_name(user) -> str | None:
