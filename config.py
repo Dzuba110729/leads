@@ -155,6 +155,10 @@ class Config:
     vk_sales_hours: str = os.getenv("VK_SALES_HOURS", "9-22")
     # Источник VK в ловце обходим не чаще раза в N часов: обход открывает десятки страниц подряд.
     vk_crawl_min_hours: int = int(os.getenv("VK_CRAWL_MIN_HOURS", "20"))
+    # Пауза между VK-источниками одного обхода (сек, случайно от MIN до MAX): подряд без передышки
+    # VK отвечал проверкой hash429 уже на третьем сообществе. Браузер в паузе свободен для лички.
+    vk_crawl_pause_min: int = int(os.getenv("VK_CRAWL_PAUSE_MIN", "60"))
+    vk_crawl_pause_max: int = int(os.getenv("VK_CRAWL_PAUSE_MAX", "120"))
 
     # Не анализируем сообщения старше этого срока - иначе первая выгрузка старого чата
     # начинает читать историю с самого начала (могут оказаться сообщения многолетней давности)
@@ -165,12 +169,18 @@ class Config:
     p1_batch_size: int = int(os.getenv("P1_BATCH_SIZE", "30"))
     # Нахлёст соседних пачек: диалог, разрезанный границей, целиком попадает хотя бы в одну
     p1_batch_overlap: int = int(os.getenv("P1_BATCH_OVERLAP", "5"))
-    # Сколько раз прогонять каждую пачку: ответ модели не дословно повторяем,
-    # объединение находок за несколько проходов поднимает полноту
-    p1_passes: int = int(os.getenv("P1_PASSES", "2"))
+    # Сколько раз прогонять каждую пачку (в разном порядке, параллельно): ответ модели не дословно
+    # повторяем, пограничных лидов она берёт через раз — объединение находок поднимает полноту
+    p1_passes: int = int(os.getenv("P1_PASSES", "3"))
     # Предфильтр дешёвой моделью перед дорогим разбором
     p1_prefilter_enabled: bool = _bool("P1_PREFILTER_ENABLED", "1")
-    p1_prefilter_batch_size: int = int(os.getenv("P1_PREFILTER_BATCH_SIZE", "60"))
+    p1_prefilter_batch_size: int = int(os.getenv("P1_PREFILTER_BATCH_SIZE", "100"))
+    # Сколько вызовов модели ловца идут одновременно (на весь процесс). Каждый `claude -p` —
+    # отдельный процесс на 200-300 МБ, а подписка ограничивает частоту — поэтому потолок.
+    catcher_llm_workers: int = int(os.getenv("CATCHER_LLM_WORKERS", "4"))
+    # FloodWait при выгрузке ТГ-чата дольше этого (сек) — чат пропускается до следующего обхода,
+    # а не останавливает весь обход на часы.
+    catcher_tg_flood_max_wait: int = int(os.getenv("CATCHER_TG_FLOOD_MAX_WAIT", "300"))
 
     # ТГ-агент оператора: отдельный бот, слушает только перечисленные Telegram-ID
     agent_bot_token: str = os.getenv("AGENT_BOT_TOKEN", "")

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 from telethon import TelegramClient, utils
@@ -119,68 +120,87 @@ async def _resolve_entity(client: TelegramClient, conn, source):
     return entity
 
 
-async def fetch_new_messages(conn, source) -> int:
-    """Тянет только новые сообщения (offset_id=last_message_id), останавливаясь на уже виденном.
-    При FloodWaitError - просто ждёт и продолжает (MVP-решение, без ретраев/ротации сверх этого)."""
+@asynccontextmanager
+async def open_client():
+    """Одно подключение на весь обход: раньше каждый чат открывал и закрывал своё,
+    и при плохой сети таймауты подключения набегали на каждый чат."""
     if not CONFIG.catcher_tg_api_id or not CONFIG.catcher_tg_api_hash:
         raise RuntimeError("CATCHER_TG_API_ID/CATCHER_TG_API_HASH не заданы в .env")
-
     client = _build_client()
     await client.connect()
     try:
-        entity = await _resolve_entity(client, conn, source)
-        offset_id = int(source["last_message_id"]) if source["last_message_id"] else 0
-        cutoff = datetime.now(timezone.utc) - timedelta(days=CONFIG.catcher_max_message_age_days)
-        # При первой выгрузке (offset_id=0) reverse=True без даты читает историю чата
-        # с самого начала - может оказаться многолетней давности. offset_date прыгает
-        # сразу к точке отсечки, дальше идём вперёд по времени как обычно.
-        offset_date = cutoff if offset_id == 0 else None
-        fetched = 0
-        max_seen_id = offset_id
-        messages = []
-        while True:
-            messages = []  # после FloodWait итерация начинается заново - без дублей
-            try:
-                async for message in client.iter_messages(
-                    entity, offset_id=offset_id, offset_date=offset_date, reverse=True, limit=None
-                ):
-                    if not message.text:
-                        continue
-                    if message.date and message.date < cutoff:
-                        continue  # защитный фильтр на случай, если offset_date сработал не так
-                    messages.append(message)
-                    max_seen_id = max(max_seen_id, message.id)
-                break
-            except FloodWaitError as e:
-                logger.warning("FloodWaitError: жду %s сек и продолжаю", e.seconds)
-                await asyncio.sleep(e.seconds)
-                continue
-
-        for message in messages:
-            sender = await message.get_sender()
-            username = getattr(sender, "username", None)
-            author = username or getattr(sender, "first_name", None)
-            row_id = catcher_db.insert_raw_message(
-                conn,
-                source_chat_id=source["id"],
-                external_id=str(message.id),
-                author=author,
-                text=message.text,
-                url=message_link(entity, message.id, source["url"]),
-                posted_at=message.date.isoformat() if message.date else None,
-                author_username=username,
-                author_tg_id=getattr(sender, "id", None),
-                reply_to_external_id=str(message.reply_to_msg_id) if message.reply_to_msg_id else None,
-            )
-            if row_id is not None:
-                fetched += 1
-                # get_sender ходит в сеть: без промежуточных коммитов выгрузка большого чата
-                # держит базу минутами и мешает продающему боту.
-                if fetched % 100 == 0:
-                    conn.commit()
-
-        if max_seen_id != offset_id:
-            catcher_db.update_cursor(conn, source["id"], str(max_seen_id))
-        return fetched
+        yield client
     finally:
         await client.disconnect()
+
+
+async def fetch_new_messages(conn, source, client: TelegramClient | None = None) -> int:
+    """Тянет только новые сообщения (offset_id=last_message_id), останавливаясь на уже виденном.
+    Короткий FloodWait - ждёт и продолжает; длинный (дольше CATCHER_TG_FLOOD_MAX_WAIT) -
+    чат пропускается до следующего обхода, чтобы не стопорить весь обход на часы.
+    Без client открывает своё подключение (одиночный чат из CRM)."""
+    if client is None:
+        async with open_client() as own_client:
+            return await fetch_new_messages(conn, source, own_client)
+
+    entity = await _resolve_entity(client, conn, source)
+    offset_id = int(source["last_message_id"]) if source["last_message_id"] else 0
+    cutoff = datetime.now(timezone.utc) - timedelta(days=CONFIG.catcher_max_message_age_days)
+    # При первой выгрузке (offset_id=0) reverse=True без даты читает историю чата
+    # с самого начала - может оказаться многолетней давности. offset_date прыгает
+    # сразу к точке отсечки, дальше идём вперёд по времени как обычно.
+    offset_date = cutoff if offset_id == 0 else None
+    fetched = 0
+    max_seen_id = offset_id
+    messages = []
+    while True:
+        messages = []  # после FloodWait итерация начинается заново - без дублей
+        try:
+            async for message in client.iter_messages(
+                entity, offset_id=offset_id, offset_date=offset_date, reverse=True, limit=None
+            ):
+                if not message.text:
+                    continue
+                if message.date and message.date < cutoff:
+                    continue  # защитный фильтр на случай, если offset_date сработал не так
+                messages.append(message)
+                max_seen_id = max(max_seen_id, message.id)
+            break
+        except FloodWaitError as e:
+            if e.seconds > CONFIG.catcher_tg_flood_max_wait:
+                raise RuntimeError(
+                    f"Telegram просит подождать {e.seconds // 60 + 1} мин, чат пропущен до следующего обхода"
+                ) from e
+            logger.warning("FloodWaitError: жду %s сек и продолжаю", e.seconds)
+            await asyncio.sleep(e.seconds)
+            continue
+
+    for message in messages:
+        sender = await message.get_sender()
+        username = getattr(sender, "username", None)
+        author = username or getattr(sender, "first_name", None)
+        row_id = catcher_db.insert_raw_message(
+            conn,
+            source_chat_id=source["id"],
+            external_id=str(message.id),
+            author=author,
+            text=message.text,
+            url=message_link(entity, message.id, source["url"]),
+            posted_at=message.date.isoformat() if message.date else None,
+            author_username=username,
+            author_tg_id=getattr(sender, "id", None),
+            reply_to_external_id=str(message.reply_to_msg_id) if message.reply_to_msg_id else None,
+        )
+        if row_id is not None:
+            fetched += 1
+            # get_sender ходит в сеть: без промежуточных коммитов выгрузка большого чата
+            # держит базу минутами и мешает продающему боту.
+            if fetched % 100 == 0:
+                conn.commit()
+
+    if max_seen_id != offset_id:
+        catcher_db.update_cursor(conn, source["id"], str(max_seen_id))
+    else:
+        # Отметка обхода и без новых сообщений — иначе мёртвый чат не отличить от необойдённого.
+        catcher_db.mark_checked(conn, source["id"])
+    return fetched

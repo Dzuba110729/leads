@@ -402,19 +402,27 @@ def add_source_from_text(text: str) -> tuple[bool, str]:
 
 
 def render_catcher_menu() -> tuple[str, InlineKeyboardMarkup]:
+    import catcher_service
+
     with db.session() as conn:
         catcher_db.migrate(conn)
         counts = catcher_db.count_candidates(conn)
         sources = [s for s in catcher_db.list_sources(conn) if s["enabled"]]
+    tg = sum(1 for s in sources if s["platform"] == "tg")
+    vk = len(sources) - tg
+    running = [catcher_service.PLATFORM_NAMES[p] for p in catcher_service.PLATFORMS if catcher_service.is_running(p)]
     text = (
         "<b>🎣 Ловец лидов</b>\n\n"
-        f"Подключено чатов: {len(sources)}\n"
+        f"Подключено чатов: {len(sources)} (Telegram {tg}, ВКонтакте {vk})\n"
         f"Кандидатов, кому ещё не писали: {counts['new']}"
-        + "\n\nДобавить чат или поставить на паузу — кнопка «📚 Чаты»."
+        + (f"\n⏳ Сейчас идёт обход: {', '.join(running)}" if running else "")
+        + "\n\nTelegram и ВКонтакте обходятся отдельно и могут идти одновременно."
+        + "\nДобавить чат или поставить на паузу — кнопка «📚 Чаты»."
     )
     kb = _kb(
-        [_btn("📄 Обойти и прислать документ", "cat:rundoc")],
-        [_btn("▶️ Обойти все чаты", "cat:runall"), _btn("🎯 Обойти один", "cat:pick")],
+        [_btn("📄 Обойти всё и прислать документ", "cat:rundoc")],
+        [_btn("▶️ Обойти Telegram", "cat:runtg"), _btn("▶️ Обойти ВК", "cat:runvk")],
+        [_btn("▶️ Обойти всё", "cat:runall"), _btn("🎯 Обойти один", "cat:pick")],
         [_btn(f"🎯 Кандидаты ({counts['new']})", "cat:cand:0")],
         [_btn("📄 Собрать документ", "cat:doc"), _btn("📚 Чаты", "cat:sources")],
     )
@@ -977,23 +985,31 @@ async def cb_cat_toggle(cb: CallbackQuery) -> None:
     await _show(cb, render_sources(pick=False, page=page))
 
 
-@router.callback_query(F.data.in_({"cat:runall", "cat:rundoc"}))
+RUN_PLATFORM = {"cat:runall": "all", "cat:rundoc": "all", "cat:runtg": "tg", "cat:runvk": "vk"}
+
+
+@router.callback_query(F.data.in_(set(RUN_PLATFORM)))
 @router.callback_query(F.data.startswith("cat:run:"))
 async def cb_cat_run(cb: CallbackQuery, bot: Bot) -> None:
     if not await _guard(cb):
         return
     import agent_bot  # здесь, а не наверху: agent_bot сам импортирует этот модуль
 
-    ids = [int(cb.data.rsplit(":", 1)[1])] if cb.data.startswith("cat:run:") else []
+    single = cb.data.startswith("cat:run:")
+    ids = [int(cb.data.rsplit(":", 1)[1])] if single else []
+    platform = "all" if single else RUN_PLATFORM[cb.data]
     export = cb.data == "cat:rundoc"
-    result = agent_bot.start_catcher_job(bot, cb.message.chat.id, ids, export=export)
+    result = agent_bot.start_catcher_job(bot, cb.message.chat.id, ids, export=export, platform=platform)
+    what = {"all": "всех чатов", "tg": "чатов Telegram", "vk": "сообществ и бесед ВКонтакте"}[platform]
     if "error" in result:
         note = f"⚠️ {_e(result['error'])}"
     elif export:
-        note = ("📄 Запустил обход всех чатов. Это займёт несколько минут — пришлю итог "
+        note = (f"📄 Запустил обход {what}. Это займёт несколько минут — пришлю итог "
                 "и ссылку на Google-документ с лидами, кому ещё не писали.")
-    else:
+    elif single:
         note = "▶️ Запустил обход. Это займёт несколько минут — итог пришлю отдельным сообщением."
+    else:
+        note = f"▶️ Запустил обход {what}. Это займёт несколько минут — итог пришлю отдельным сообщением."
     text, kb = render_catcher_menu()
     await _show(cb, (f"{note}\n\n{text}", kb))
 

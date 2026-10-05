@@ -202,7 +202,7 @@ def test_rundoc_button_starts_job_with_export(tmp_path, monkeypatch):
     text, kb = agent_menu.render_catcher_menu()
     assert kb.inline_keyboard[0][0].callback_data == "cat:rundoc"
     calls = []
-    monkeypatch.setattr(agent_bot, "start_catcher_job", lambda bot, chat, ids, export: calls.append((ids, export)) or {"started": True})
+    monkeypatch.setattr(agent_bot, "start_catcher_job", lambda bot, chat, ids, export, platform: calls.append((ids, export, platform)) or {"started": True})
     monkeypatch.setattr(CONFIG, "agent_allowed_ids", [1])
 
     class Msg:
@@ -216,7 +216,7 @@ def test_rundoc_button_starts_job_with_export(tmp_path, monkeypatch):
         async def answer(self, *a, **k): pass
 
     asyncio.run(agent_menu.cb_cat_run(Cb(), bot=None))
-    assert calls == [([], True)]
+    assert calls == [([], True, "all")]
 
 
 def test_parse_normalizes_message_links_and_rejects_invites():
@@ -256,7 +256,7 @@ def test_maybe_candidates_are_hidden(tmp_path, monkeypatch):
             catcher_db.add_candidate(conn, raw_message_id=mid, quote=f"цитата {i}", reason="r",
                                      contact_url=None, opener_text="Здравствуйте", confidence=conf)
     _, kb = agent_menu.render_catcher_menu()
-    assert [b.text for b in kb.inline_keyboard[2]] == ["🎯 Кандидаты (1)"]
+    assert [b.text for b in kb.inline_keyboard[3]] == ["🎯 Кандидаты (1)"]
     text, kb = agent_menu.render_candidate(0)
     assert "Кандидат 1 из 1" in text and "цитата 1" in text
     done = [b.callback_data for row in kb.inline_keyboard for b in row if (b.callback_data or "").startswith("cat:done:")][0]

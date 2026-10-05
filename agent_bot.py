@@ -37,7 +37,7 @@ agent_dp.startup.register(agent_menu.set_commands)
 MAX_HISTORY_MESSAGES = 40
 MAX_TOOL_ROUNDS = 8
 
-_running_jobs: dict[int, asyncio.Task] = {}
+_running_jobs: dict[tuple[int, str], asyncio.Task] = {}  # (чат оператора, платформа) -> задача обхода
 _client = None
 
 
@@ -92,7 +92,8 @@ SYSTEM_PROMPT = """Ты — помощник оператора системы o
 - сводка и счётчики: get_stats; состояние системы и режимов: get_system_status;
 - лиды продаж: list_leads (горячие/последние/заблокированные), get_lead (карточка + последние сообщения);
 - заявки: list_orders;
-- ловец: list_sources, list_recent_candidates, start_catcher_run (обход в фоне, итог придёт сам),
+- ловец: list_sources, list_recent_candidates, start_catcher_run (обход в фоне, итог придёт сам;
+  platform: tg — только Telegram, vk — только ВКонтакте, all — обе сразу, они идут параллельно),
   export_leads (Google-документ). «Обойди и пришли документ» — это start_catcher_run с export_to_gdoc=true.
 
 Как понимать «обойти чат X»: сначала list_sources, найди источник по совпадению названия/ссылки, передай его id.
@@ -129,8 +130,13 @@ TOOLS = [
                     "type": "boolean",
                     "description": "После обхода собрать Google-документ с новыми лидами и прислать ссылку.",
                 },
+                "platform": {
+                    "type": "string",
+                    "enum": ["all", "tg", "vk"],
+                    "description": "Какие чаты обходить: all — Telegram и ВКонтакте параллельно, tg или vk — только одну платформу.",
+                },
             },
-            "required": ["source_ids", "export_to_gdoc"],
+            "required": ["source_ids", "export_to_gdoc", "platform"],
             "additionalProperties": False,
         },
         "strict": True,
@@ -373,10 +379,18 @@ async def _tool_export_leads(status: str, source_ids: list[int], since_days: int
     return json.dumps({"url": url, "leads_in_document": count}, ensure_ascii=False)
 
 
-async def _catcher_job(bot: Bot, chat_id: int, source_ids: list[int], export: bool) -> None:
+def _platforms(platform: str) -> tuple[str, ...]:
+    return catcher_service.PLATFORMS if platform == "all" else (platform,)
+
+
+def _job_title(platform: str) -> str:
+    return "Обход" if platform == "all" else f"Обход {catcher_service.PLATFORM_NAMES[platform]}"
+
+
+async def _catcher_job(bot: Bot, chat_id: int, source_ids: list[int], export: bool, platform: str = "all") -> None:
     try:
-        results = await catcher_service.run_sources(source_ids or None)
-        lines = ["Обход закончен."]
+        results = await catcher_service.run_sources(source_ids or None, _platforms(platform))
+        lines = [f"{_job_title(platform)} закончен."]
         total_new = 0
         for r in results:
             name = r.url.replace("https://", "")
@@ -410,22 +424,31 @@ async def _catcher_job(bot: Bot, chat_id: int, source_ids: list[int], export: bo
         await send_markdown(bot, chat_id, "\n".join(lines))
     except Exception as exc:
         logger.exception("catcher job failed")
-        await send_markdown(bot, chat_id, f"Обход прервался с ошибкой: {exc}")
+        await send_markdown(bot, chat_id, f"{_job_title(platform)} прервался с ошибкой: {exc}")
     finally:
-        _running_jobs.pop(chat_id, None)
+        _running_jobs.pop((chat_id, platform), None)
 
 
-def start_catcher_job(bot: Bot, chat_id: int, source_ids: list[int], export: bool) -> dict:
-    if chat_id in _running_jobs and not _running_jobs[chat_id].done():
-        return {"error": "обход уже идёт, дождитесь его завершения"}
+def start_catcher_job(bot: Bot, chat_id: int, source_ids: list[int], export: bool, platform: str = "all") -> dict:
+    """ТГ и ВК обходятся независимо: занятая платформа не мешает запустить другую.
+    Занятость смотрим по замку платформы — он общий и для агента, и для меню, и для CRM."""
+    if platform not in ("all", *catcher_service.PLATFORMS):
+        return {"error": f"неизвестная платформа {platform}"}
+    busy = [p for p in _platforms(platform) if catcher_service.is_running(p)]
+    if busy or any(not t.done() for (cid, p), t in _running_jobs.items()
+                   if cid == chat_id and set(_platforms(p)) & set(_platforms(platform))):
+        names = ", ".join(catcher_service.PLATFORM_NAMES[p] for p in busy) or "этих чатов"
+        return {"error": f"обход {names} уже идёт, дождитесь его завершения"}
     if export and not gdocs.available():
         return {"error": "Google Docs не настроен (нужен google_login.py), обход не запущен"}
-    _running_jobs[chat_id] = asyncio.create_task(_catcher_job(bot, chat_id, source_ids, export))
-    return {"started": True, "sources": source_ids or "all", "export_to_gdoc": export}
+    _running_jobs[(chat_id, platform)] = asyncio.create_task(
+        _catcher_job(bot, chat_id, source_ids, export, platform)
+    )
+    return {"started": True, "platform": platform, "sources": source_ids or "all", "export_to_gdoc": export}
 
 
-def _tool_start_catcher_run(bot: Bot, chat_id: int, source_ids: list[int], export: bool) -> str:
-    return json.dumps(start_catcher_job(bot, chat_id, source_ids, export), ensure_ascii=False)
+def _tool_start_catcher_run(bot: Bot, chat_id: int, source_ids: list[int], export: bool, platform: str) -> str:
+    return json.dumps(start_catcher_job(bot, chat_id, source_ids, export, platform), ensure_ascii=False)
 
 
 async def _execute_tool(name: str, args: dict, bot: Bot, chat_id: int) -> tuple[str, bool]:
@@ -447,7 +470,9 @@ async def _execute_tool(name: str, args: dict, bot: Bot, chat_id: int) -> tuple[
         if name == "export_leads":
             return await _tool_export_leads(args["status"], args["source_ids"], args["since_days"]), False
         if name == "start_catcher_run":
-            return _tool_start_catcher_run(bot, chat_id, args["source_ids"], args["export_to_gdoc"]), False
+            return _tool_start_catcher_run(
+                bot, chat_id, args["source_ids"], args["export_to_gdoc"], args.get("platform", "all")
+            ), False
         return f"неизвестный инструмент {name}", True
     except Exception as exc:
         logger.exception("tool %s failed", name)

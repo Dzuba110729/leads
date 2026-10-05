@@ -89,26 +89,35 @@ def test_answer_runs_tool_loop(tmp_path, monkeypatch):
 
 def test_start_catcher_run_sends_result_later(tmp_path, monkeypatch):
     _setup_db(tmp_path, monkeypatch)
+    calls = []
 
-    async def fake_run_sources(ids):
+    async def fake_run_sources(ids, platforms):
+        calls.append(platforms)
         return [agent_bot.catcher_service.SourceRunResult(1, "https://t.me/parents_chat", 12, 2)]
 
     monkeypatch.setattr(agent_bot.catcher_service, "run_sources", fake_run_sources)
     bot = _FakeBot()
 
     async def scenario():
-        started = json.loads(agent_bot._tool_start_catcher_run(bot, 42, [], False))
+        started = json.loads(agent_bot._tool_start_catcher_run(bot, 42, [], False, "tg"))
         assert started["started"] is True
-        busy = json.loads(agent_bot._tool_start_catcher_run(bot, 42, [], False))
+        tg_job = agent_bot._running_jobs[(42, "tg")]
+        busy = json.loads(agent_bot._tool_start_catcher_run(bot, 42, [], False, "tg"))
         assert "error" in busy
-        await agent_bot._running_jobs[42]
+        # «всё» включает уже идущий Telegram — тоже нельзя
+        assert "error" in json.loads(agent_bot._tool_start_catcher_run(bot, 42, [], False, "all"))
+        # а ВК независим от Telegram и запускается параллельно
+        assert json.loads(agent_bot._tool_start_catcher_run(bot, 42, [], False, "vk"))["started"] is True
+        await asyncio.gather(tg_job, agent_bot._running_jobs[(42, "vk")])
 
     asyncio.run(scenario())
+    assert calls == [("tg",), ("vk",)]
     assert bot.sent and "новых лидов 2" in bot.sent[0][1]
-    assert 42 not in agent_bot._running_jobs
+    assert "Telegram закончен" in bot.sent[0][1]
+    assert not agent_bot._running_jobs
 
 
 def test_export_requires_google_config(monkeypatch):
     monkeypatch.setattr(agent_bot.gdocs, "available", lambda: False)
-    result = json.loads(agent_bot._tool_start_catcher_run(_FakeBot(), 1, [], True))
+    result = json.loads(agent_bot._tool_start_catcher_run(_FakeBot(), 1, [], True, "all"))
     assert "Google Docs не настроен" in result["error"]

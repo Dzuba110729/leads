@@ -58,8 +58,13 @@ NOT_LOGGED_IN = (
     "VK: браузер ловца не залогинен. На компьютере с ботом выполните "
     "`.venv/bin/python vk_browser_login.py`, войдите в VK в открывшемся окне и нажмите Enter"
 )
+VK_CHALLENGE = (
+    "VK: показал проверку (challenge, «слишком много запросов») — вход не слетел. Выполните "
+    "`.venv/bin/python vk_browser_login.py`, пройдите проверку в открывшемся окне и сделайте перерыв "
+    "перед следующим обходом"
+)
 
-MAX_POSTS_OPENED = 40  # постов с комментариями, открываемых за один обход
+MAX_POSTS_OPENED = 15  # постов с комментариями за один обход (было 40 — VK отвечал проверкой hash429)
 MAX_WALL_STEPS = 150  # шагов колеса по стене — предохранитель от бесконечной ленты
 IDLE_WALL_STEPS = 8  # столько шагов подряд без новых постов — стена кончилась
 OLD_POSTS_IN_ROW = 3  # столько постов подряд старше отсечки — дальше листать незачем
@@ -675,6 +680,27 @@ def is_logged_in(page) -> bool:
     return parsed.hostname in ("vk.com", "vk.ru", "m.vk.com", "m.vk.ru") and parsed.path.startswith("/feed")
 
 
+def access_problem(url: str) -> str | None:
+    """Почему VK не пускает на открытую страницу; None — пускает (или по адресу не понять)."""
+    parsed = urlparse(url or "")
+    path = parsed.path.lower()
+    if "challenge" in path or "captcha" in path:
+        return VK_CHALLENGE
+    if path.startswith("/login") or (parsed.hostname or "").startswith("id.vk"):
+        return NOT_LOGGED_IN
+    return None
+
+
+def ensure_access(page) -> None:
+    """Проверка входа по уже открытой странице — без отдельного захода в /feed на каждый источник:
+    лишние загрузки и приводили к проверке hash429, которую ловец принимал за выход из аккаунта."""
+    reason = access_problem(page.url)
+    if reason is None and not page.evaluate("() => (window.vk && window.vk.id) || 0") and not is_logged_in(page):
+        reason = NOT_LOGGED_IN
+    if reason:
+        raise RuntimeError(reason)
+
+
 def _wait_selector(page, selector: str, timeout_ms: int) -> bool:
     from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
@@ -767,10 +793,8 @@ def fetch_new_messages(conn, source) -> int:
             context = open_context(p, headless=True)
             try:
                 page = context.pages[0] if context.pages else context.new_page()
-                if not is_logged_in(page):
-                    raise RuntimeError(NOT_LOGGED_IN)
-                _pause(1.0, 1.5)
                 page.goto(f"https://vk.com/{slug}", wait_until="domcontentloaded", timeout=30000)
+                ensure_access(page)
                 if not _wait_selector(page, "[data-post-id]", 15000):
                     raise RuntimeError(f"VK: на странице {source['url']} не нашлось постов — сообщество закрыто или ссылка неверная")
                 group_name = page.evaluate(GROUP_NAME_JS) or None
@@ -860,6 +884,7 @@ def _collect_chat(page, now: datetime, cutoff: datetime, after_id: int,
 
 def _open_chat(page, peer_id: int) -> None:
     page.goto(chat_url(peer_id), wait_until="domcontentloaded", timeout=30000)
+    ensure_access(page)
     if not _wait_selector(page, "[data-testid=me_main_content] .ConvoHistory__flow", 20000) \
             or f"/im/convo/{peer_id}" not in page.url:
         raise RuntimeError(
@@ -883,9 +908,6 @@ def crawl_chat(peer_id: int, after_id: int = 0, max_messages: int = MAX_CHAT_MES
             context = open_context(p, headless=True)
             try:
                 page = context.pages[0] if context.pages else context.new_page()
-                if not is_logged_in(page):
-                    raise RuntimeError(NOT_LOGGED_IN)
-                _pause(1.0, 1.5)
                 _open_chat(page, peer_id)
                 items, title = _collect_chat(page, now, cutoff, after_id, max_messages)
             finally:
@@ -928,9 +950,8 @@ def list_joined_chats(max_steps: int = 15) -> list[tuple[int, str]]:
         context = open_context(p, headless=True)
         try:
             page = context.pages[0] if context.pages else context.new_page()
-            if not is_logged_in(page):
-                raise RuntimeError(NOT_LOGGED_IN)
             page.goto("https://vk.com/im", wait_until="domcontentloaded", timeout=30000)
+            ensure_access(page)
             if not _wait_selector(page, "[data-testid=vkme_convo_list_item]", 20000):
                 return []
             page.wait_for_timeout(1500)

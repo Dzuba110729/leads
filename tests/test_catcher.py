@@ -262,3 +262,230 @@ def test_tg_peer_is_remembered_and_reused():
     catcher_db.save_tg_peer(conn, source["id"], "channel", 2223334445, 987654321)
     peer = catcher_tg._cached_peer(catcher_db.get_source(conn, source["id"]))
     assert peer == InputPeerChannel(2223334445, 987654321)
+
+
+def test_run_platform_fetches_everything_before_analysis(tmp_path, monkeypatch):
+    """Сначала выгрузка всех чатов платформы, потом разбор; чужая платформа не трогается."""
+    import asyncio
+
+    import catcher_service
+    import db
+    from config import CONFIG
+
+    monkeypatch.setattr(CONFIG, "db_path", str(tmp_path / "t.db"))
+    with db.session() as conn:
+        catcher_db.migrate(conn)
+        a = catcher_db.add_source(conn, "tg", "https://t.me/a")["id"]
+        b = catcher_db.add_source(conn, "tg", "https://t.me/b")["id"]
+        catcher_db.add_source(conn, "vk", "https://vk.com/c")
+    events = []
+
+    async def fake_fetch(source, client=None):
+        events.append(("fetch", source["id"]))
+        return 1
+
+    def fake_process(conn, source_id):
+        events.append(("analyze", source_id))
+        return 0
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def fake_client(platform):
+        yield None
+
+    monkeypatch.setattr(catcher_service, "_fetch", fake_fetch)
+    monkeypatch.setattr(catcher_service, "_tg_client", fake_client)
+    monkeypatch.setattr(catcher_service.catcher_pipeline, "process_source", fake_process)
+    results = asyncio.run(catcher_service.run_sources(None, ("tg",)))
+    assert [r.source_id for r in results] == [a, b]
+    assert events == [("fetch", a), ("fetch", b), ("analyze", a), ("analyze", b)]
+
+
+def _vk_run(tmp_path, monkeypatch, fetch):
+    import asyncio
+
+    import catcher_service
+    import db
+    from config import CONFIG
+
+    monkeypatch.setattr(CONFIG, "db_path", str(tmp_path / "t.db"))
+    monkeypatch.setattr(CONFIG, "vk_crawl_pause_min", 0)
+    monkeypatch.setattr(CONFIG, "vk_crawl_pause_max", 0)
+    with db.session() as conn:
+        catcher_db.migrate(conn)
+        ids = [catcher_db.add_source(conn, "vk", f"https://vk.com/g{i}")["id"] for i in range(3)]
+    monkeypatch.setattr(catcher_service, "_fetch", fetch)
+    monkeypatch.setattr(catcher_service.catcher_pipeline, "process_source", lambda conn, sid: 0)
+    return ids, asyncio.run(catcher_service.run_sources(None, ("vk",)))
+
+
+def test_vk_crawl_stops_after_access_lost(tmp_path, monkeypatch):
+    """VK не пускает аккаунт — остальные источники не трогаем, иначе VK отвечает проверкой hash429."""
+    import vk_browser
+
+    calls = []
+
+    async def fetch(source, client=None):
+        calls.append(source["id"])
+        raise RuntimeError(vk_browser.NOT_LOGGED_IN)
+
+    ids, results = _vk_run(tmp_path, monkeypatch, fetch)
+    assert calls == [ids[0]]
+    assert results[0].error and not results[0].skipped
+    assert all(r.skipped and "остановлен" in r.skipped for r in results[1:])
+
+
+def test_vk_crawl_continues_after_ordinary_error(tmp_path, monkeypatch):
+    calls = []
+
+    async def fetch(source, client=None):
+        calls.append(source["id"])
+        raise RuntimeError("Page.goto: Timeout 30000ms exceeded.")
+
+    ids, results = _vk_run(tmp_path, monkeypatch, fetch)
+    assert calls == ids
+
+
+def test_vk_crawl_skipped_while_sales_halted(tmp_path, monkeypatch):
+    import vk_messenger
+
+    calls = []
+
+    async def fetch(source, client=None):
+        calls.append(source["id"])
+        return 0
+
+    monkeypatch.setattr(vk_messenger.STATUS, "halted", "VK показал капчу")
+    ids, results = _vk_run(tmp_path, monkeypatch, fetch)
+    assert calls == []
+    assert all("диалоги VK остановлены" in r.skipped for r in results)
+
+
+def test_second_pass_reads_batch_in_reverse(monkeypatch):
+    """Второй проход - не копия первого: порядок обратный, номер сопоставляется с ним."""
+    conn = _mem_conn()
+    source = catcher_db.add_source(conn, "tg", "https://t.me/test_group")
+    for i, text in enumerate(["всем привет", "ищу дистанционную школу", "как дела"], start=1):
+        catcher_db.insert_raw_message(conn, source["id"], str(i), "a", text, None, None)
+    orders = []
+
+    def fake_p1(messages, reply_map=None):
+        orders.append([m["text"] for m in messages])
+        # Оба прохода называют «ищу дистанционную школу» по номеру в СВОЁМ порядке
+        n = next(i for i, m in enumerate(messages, start=1) if "школу" in m["text"])
+        return [{"n": n, "confidence": "high", "reason": "ищет школу"}], True
+
+    monkeypatch.setattr(catcher_pipeline, "prefilter", lambda m, r=None: (m, True))
+    monkeypatch.setattr(catcher_pipeline, "run_p1_on_batch", fake_p1)
+    monkeypatch.setattr(catcher_pipeline.CONFIG, "p1_passes", 2)
+    assert catcher_pipeline.process_source(conn, source["id"]) == 1
+    assert sorted(orders) == sorted([["всем привет", "ищу дистанционную школу", "как дела"],
+                                     ["как дела", "ищу дистанционную школу", "всем привет"]])
+    candidate = conn.execute("SELECT * FROM catch_candidates").fetchone()
+    assert candidate["quote"] == "ищу дистанционную школу"  # цитата - само сообщение
+
+
+def test_batch_stays_unprocessed_if_any_pass_failed(monkeypatch):
+    """Находку упавшего прохода никто не заменит - пачку разбираем ещё раз, найденное не теряется."""
+    conn = _mem_conn()
+    source = catcher_db.add_source(conn, "tg", "https://t.me/test_group")
+    catcher_db.insert_raw_message(conn, source["id"], "1", "a", "ищу дистанционную школу", None, None)
+    answers = iter([([{"n": 1, "confidence": "high"}], True), ([], False)])
+    monkeypatch.setattr(catcher_pipeline, "prefilter", lambda m, r=None: (m, True))
+    monkeypatch.setattr(catcher_pipeline, "run_p1_on_batch", lambda m, r=None: next(answers))
+    monkeypatch.setattr(catcher_pipeline.CONFIG, "p1_passes", 2)
+    monkeypatch.setattr(catcher_pipeline.CONFIG, "catcher_llm_workers", 1)
+    assert catcher_pipeline.process_source(conn, source["id"]) == 1
+    assert len(catcher_db.unprocessed_messages_for_source(conn, source["id"])) == 1
+
+
+def test_openers_written_separately_and_filled_later(monkeypatch):
+    conn = _mem_conn()
+    source = catcher_db.add_source(conn, "tg", "https://t.me/test_group")
+    catcher_db.insert_raw_message(conn, source["id"], "1", "a", "ищу дистанционную школу", None, None)
+    monkeypatch.setattr(catcher_pipeline, "prefilter", lambda m, r=None: (m, True))
+    monkeypatch.setattr(catcher_pipeline, "run_p1_on_batch", lambda m, r=None: ([{"n": 1, "confidence": "high"}], True))
+
+    # Модель заготовок не ответила — кандидат всё равно есть, заготовка пустая
+    monkeypatch.setattr(catcher_pipeline, "_llm", lambda *a, **kw: None)
+    catcher_pipeline.process_source(conn, source["id"])
+    assert conn.execute("SELECT opener_text FROM catch_candidates").fetchone()[0] == ""
+
+    # Следующий обход (новых сообщений нет) дописывает заготовку
+    monkeypatch.setattr(catcher_pipeline, "_llm", lambda *a, **kw: '[{"n": 1, "opener_text": "Добрый день!"}]')
+    catcher_pipeline.process_source(conn, source["id"])
+    assert conn.execute("SELECT opener_text FROM catch_candidates").fetchone()[0] == "Добрый день!"
+
+
+def test_prefilter_uses_its_own_bigger_batches(monkeypatch):
+    conn = _mem_conn()
+    source = catcher_db.add_source(conn, "tg", "https://t.me/test_group")
+    for i in range(7):
+        catcher_db.insert_raw_message(conn, source["id"], str(i), "a", f"сообщение {i}", None, None)
+    sizes = []
+    monkeypatch.setattr(catcher_pipeline, "prefilter", lambda m, r=None: (sizes.append(len(m)) or ([], True)))
+    monkeypatch.setattr(catcher_pipeline.CONFIG, "p1_prefilter_batch_size", 5)
+    monkeypatch.setattr(catcher_pipeline.CONFIG, "p1_batch_size", 2)
+    catcher_pipeline.process_source(conn, source["id"])
+    assert sorted(sizes) == [2, 5]
+    assert catcher_db.unprocessed_messages_for_source(conn, source["id"]) == []
+
+
+def test_three_passes_use_different_orders(monkeypatch):
+    conn = _mem_conn()
+    source = catcher_db.add_source(conn, "tg", "https://t.me/test_group")
+    for i in range(6):
+        catcher_db.insert_raw_message(conn, source["id"], str(i), "a", f"сообщение {i}", None, None)
+    orders = []
+    monkeypatch.setattr(catcher_pipeline, "prefilter", lambda m, r=None: (m, True))
+    monkeypatch.setattr(catcher_pipeline, "run_p1_on_batch",
+                        lambda m, r=None: (orders.append(tuple(x["id"] for x in m)) or ([], True)))
+    monkeypatch.setattr(catcher_pipeline.CONFIG, "p1_passes", 3)
+    catcher_pipeline.process_source(conn, source["id"])
+    assert len(orders) == 3 and len(set(orders)) == 3
+    assert all(sorted(o) == sorted(orders[0]) for o in orders)
+
+
+def test_vk_access_problem_tells_challenge_from_logout():
+    import vk_browser
+
+    assert vk_browser.access_problem("https://vk.com/challenge.html?hash429=x") == vk_browser.VK_CHALLENGE
+    assert vk_browser.access_problem("https://vk.com/login?u=2") == vk_browser.NOT_LOGGED_IN
+    assert vk_browser.access_problem("https://id.vk.com/auth") == vk_browser.NOT_LOGGED_IN
+    assert vk_browser.access_problem("https://vk.com/im/convo/2000000001") is None
+    assert vk_browser.access_problem("https://vk.com/famedu_co") is None
+
+
+def test_vk_crawl_stops_after_challenge(tmp_path, monkeypatch):
+    import vk_browser
+
+    calls = []
+
+    async def fetch(source, client=None):
+        calls.append(source["id"])
+        raise RuntimeError(vk_browser.VK_CHALLENGE)
+
+    ids, results = _vk_run(tmp_path, monkeypatch, fetch)
+    assert calls == [ids[0]]
+
+
+def test_vk_crawl_pauses_between_sources(tmp_path, monkeypatch):
+    """Между VK-источниками — пауза (перед первым не ждём), чтобы VK не принял обход за бота."""
+    import asyncio
+
+    import catcher_service
+
+    sleeps = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(seconds, *a, **k):
+        sleeps.append(seconds)
+        await real_sleep(0)
+
+    async def fetch(source, client=None):
+        return 0
+
+    monkeypatch.setattr(catcher_service.asyncio, "sleep", fake_sleep)
+    ids, results = _vk_run(tmp_path, monkeypatch, fetch)
+    assert len(sleeps) == len(ids) - 1

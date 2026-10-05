@@ -409,6 +409,25 @@ def mark_contacted(conn: sqlite3.Connection, candidate_id: int) -> None:
     conn.execute("UPDATE catch_candidates SET status = 'contacted' WHERE id = ?", (candidate_id,))
 
 
+def candidates_without_opener(conn: sqlite3.Connection, source_chat_id: int) -> list[sqlite3.Row]:
+    """Новые точные кандидаты источника без заготовки входа: заготовку пишут отдельным вызовом,
+    и если он не отработал, она дописывается при следующем обходе."""
+    return conn.execute(
+        """
+        SELECT c.id, c.reason, r.text FROM catch_candidates c
+        JOIN raw_messages r ON r.id = c.raw_message_id
+        WHERE r.source_chat_id = ? AND c.status = 'new' AND c.confidence = 'high'
+          AND COALESCE(c.opener_text, '') = ''
+        ORDER BY c.id
+        """,
+        (source_chat_id,),
+    ).fetchall()
+
+
+def set_opener(conn: sqlite3.Connection, candidate_id: int, opener_text: str) -> None:
+    conn.execute("UPDATE catch_candidates SET opener_text = ? WHERE id = ?", (opener_text, candidate_id))
+
+
 # --- контакт автора ----------------------------------------------------------------------------
 
 def _field(row, name):
