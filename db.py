@@ -138,6 +138,8 @@ ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "declined_at": "TEXT",
         # имя из профиля Telegram (first_name + last_name) — для карточки готового лида
         "name": "TEXT",
+        # имя, которое лид сам назвал на «как к Вам обращаться?» — главнее имени из профиля
+        "real_name": "TEXT",
         # откуда лид: 'tg' или 'vk'. У VK-лида tg_id = -vk_id (колонка NOT NULL UNIQUE), см. vk_tg_id
         "platform": "TEXT NOT NULL DEFAULT 'tg'",
         "vk_id": "INTEGER", "vk_path": "TEXT",
@@ -145,6 +147,8 @@ ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     "orders": {
         # что лид прислал в ответ на «номер и удобное время для звонка» (весь текст, как есть)
         "contact": "TEXT", "contact_at": "TEXT",
+        # контакт уже прислан, но имя в профиле непонятное — ждём ответ на «как к Вам обращаться?»
+        "contact_draft": "TEXT",
         # лента готовых лидов: куда ушла карточка ("chat:msg,..."), когда и кем передан специалисту
         "ready_msgs": "TEXT", "passed_at": "TEXT", "passed_by": "TEXT",
         # Megabitra: id лида там и строка результата для карточки («лид #123 принят» / причина)
@@ -286,6 +290,18 @@ def display_name(user) -> str | None:
 def set_lead_name(conn: sqlite3.Connection, lead_id: int, name: str | None) -> None:
     if name:
         conn.execute("UPDATE leads SET name = ? WHERE id = ?", (name, lead_id))
+
+
+def set_lead_real_name(conn: sqlite3.Connection, lead_id: int, name: str | None) -> None:
+    if name:
+        conn.execute("UPDATE leads SET real_name = ? WHERE id = ?", (name, lead_id))
+
+
+def lead_person_name(lead) -> str | None:
+    """Имя для специалиста и Megabitra: названное самим лидом или очищенное имя профиля."""
+    import pipeline
+
+    return lead["real_name"] or pipeline.clean_name(lead["name"])
 
 
 def leads_without_name(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -459,6 +475,10 @@ def set_order_contact(conn: sqlite3.Connection, order_id: int, contact: str) -> 
     )
 
 
+def set_order_contact_draft(conn: sqlite3.Connection, order_id: int, contact: str) -> None:
+    conn.execute("UPDATE orders SET contact_draft = ?, updated_at = ? WHERE id = ?", (contact, now(), order_id))
+
+
 def set_ready_msgs(conn: sqlite3.Connection, order_id: int, msgs: list[tuple[int, int]]) -> None:
     conn.execute(
         "UPDATE orders SET ready_msgs = ? WHERE id = ?",
@@ -557,7 +577,16 @@ def next_status(status: str) -> str | None:
 
 def list_orders_for_reminders(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
-        "SELECT * FROM orders WHERE closed = 0 AND status = 'заявка' AND contact IS NULL"
+        "SELECT * FROM orders WHERE closed = 0 AND status = 'заявка' AND contact IS NULL AND contact_draft IS NULL"
+    ).fetchall()
+
+
+def orders_waiting_name(conn: sqlite3.Connection, older_than: str) -> list[sqlite3.Row]:
+    """Контакт дан, на «как к Вам обращаться?» не ответили с older_than — пора передавать без имени."""
+    return conn.execute(
+        """SELECT * FROM orders WHERE closed = 0 AND contact IS NULL AND contact_draft IS NOT NULL
+           AND updated_at < ?""",
+        (older_than,),
     ).fetchall()
 
 

@@ -6,9 +6,11 @@
 У лида из Telegram нет своего IP — передаём внешний IP компьютера с ботом (MEGABITRA_LEAD_IP=auto)
 или заданный адрес. Лид без телефона (выбрал тг/почту) уходит с заглушкой MEGABITRA_NO_PHONE,
 способ связи — в комментарии (решение владельца 2026-09-28).
+В комментарии — не переписка, а суть запроса в 2-3 предложения (лимит поля в Megabitra 800 символов).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 
@@ -21,7 +23,8 @@ from config import CONFIG
 logger = logging.getLogger(__name__)
 
 PUSH_URL = "https://megabitra.ru/api/wm/push.json"
-COMMENT_LIMIT = 1500
+COMMENT_LIMIT = 800
+CONTACT_LIMIT = 150
 
 ERRORS = {
     "access": "отправка по API не включена — нужен личный менеджер",
@@ -72,26 +75,25 @@ def normalize_phone(raw: str | None) -> str | None:
     return digits if 10 <= len(digits) <= 15 else None
 
 
-def _comment(order, lead) -> str:
+def _comment(order, lead, essence: str | None = None) -> str:
     if db.is_vk_lead(lead):
         origin = f"Из VK ({db.vk_profile_url(lead)})"
     else:
         nick = f"@{lead['username']}" if lead["username"] else f"tg id {lead['tg_id']}"
         origin = f"Из Telegram ({nick})"
-    parts = [
-        f"{origin}, заявка og1 №{order['id']}.",
-        f"Запрос: {order['summary'] or order['tariff']}.",
-        f"Как связаться: {order['contact']}.",
-    ]
-    dialog = " / ".join(line.strip() for line in (lead["dialog_context"] or "").splitlines() if line.strip())
-    text = " ".join(parts)
-    room = COMMENT_LIMIT - len(text) - 12
-    if dialog and room > 100:
-        text += " Переписка: " + (dialog if len(dialog) <= room else "…" + dialog[-room:])
-    return text
+    contact = (order["contact"] or "").strip()
+    if len(contact) > CONTACT_LIMIT:
+        contact = contact[:CONTACT_LIMIT - 1] + "…"
+    head = f"{origin}, заявка og1 №{order['id']}. "
+    tail = f" Как связаться: {contact}."
+    request = " ".join((essence or order["summary"] or order["tariff"] or "").split())
+    room = COMMENT_LIMIT - len(head) - len(tail) - len("Запрос: ")
+    if len(request) > room:
+        request = request[:room - 1].rstrip() + "…"
+    return f"{head}Запрос: {request}{tail}"
 
 
-def build_payload(order, lead, ip: str) -> dict | None:
+def build_payload(order, lead, ip: str, essence: str | None = None) -> dict | None:
     """Поля для push.json. Без телефона — заглушка MEGABITRA_NO_PHONE, а если её нет — None."""
     phone = normalize_phone(pipeline.extract_phone(order["contact"] or "")) or normalize_phone(CONFIG.megabitra_no_phone)
     if phone is None:
@@ -101,8 +103,8 @@ def build_payload(order, lead, ip: str) -> dict | None:
         "offer": CONFIG.megabitra_offer,
         "ip": ip,
         "phone": phone,
-        "name": lead["name"] or lead["username"] or "",
-        "comment": _comment(order, lead),
+        "name": db.lead_person_name(lead) or lead["username"] or "",
+        "comment": _comment(order, lead, essence),
         "utm_source": "telegram",
         "utm_medium": "og1_bot",
         "subid": f"og1-{order['id']}",
@@ -134,7 +136,8 @@ async def push_lead(order, lead) -> dict:
     ip = await lead_ip()
     if not ip:
         return {"status": "error", "error": "не удалось узнать IP"}
-    payload = build_payload(order, lead, ip)
+    essence = await asyncio.to_thread(pipeline.summarize_request, lead["dialog_context"] or "")
+    payload = build_payload(order, lead, ip, essence)
     if payload is None:
         return {"status": "skip", "error": "nophone"}
     try:

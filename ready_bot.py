@@ -48,7 +48,8 @@ def card_text(order, lead) -> str:
     else:
         nick = f"@{lead['username']}" if lead["username"] else f"ID {lead['tg_id']}"
         link = f"https://t.me/{lead['username']}" if lead["username"] else f"tg://user?id={lead['tg_id']}"
-    who = f"{lead['name']} ({nick})" if lead["name"] else nick
+    name = db.lead_person_name(lead) or lead["name"]
+    who = f"{name} ({nick})" if name else nick
     price = f"{order['price']:,.0f} ₽".replace(",", " ") if order["price"] else "по запросу"
     head = (
         f"🟢 <b>Готов к связи — заявка №{order['id']}</b>\n\n"

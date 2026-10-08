@@ -13,6 +13,7 @@ import catalog
 import kp
 import llm
 from prompts import (
+    REQUEST_ESSENCE_PROMPT_OG1,
     BUSINESS_CONTEXT_OG1,
     CLOSING_PROMPT_OG1,
     HEURISTIC_SCORE_KEYWORDS,
@@ -81,6 +82,8 @@ ALTERNATIVES_TEXT_VK = "Хорошо, тогда можно связаться �
 def alternatives_text(platform: str = "tg") -> str:
     return ALTERNATIVES_TEXT_VK if platform == "vk" else ALTERNATIVES_TEXT
 EMAIL_REQUEST_TEXT = "Хорошо, напишите, пожалуйста, адрес почты."
+# Имя в профиле непонятное (ник, эмодзи, «Мама Димы») — спрашиваем перед передачей специалисту.
+NAME_REQUEST_TEXT = "И подскажите, пожалуйста, как к Вам обращаться?"
 CONTACT_THANKS_TEXT = "Хорошо, передаю Ваши контакты специалисту по данному направлению, он с Вами свяжется."
 
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
@@ -206,11 +209,12 @@ def score_message(text: str) -> ScoreResult:
 def generate_touch(band: str, funnel_stage: str, dialog_text: str) -> str:
     system_prompt = (
         f"{TEMPLATE_A_OG1}\n\n{MANAGER_STYLE_OG1}\n\nЭтап воронки лида: {funnel_stage}. Бэнд готовности: {band}.\n\n"
-        f"АКТУАЛЬНЫЕ ТАРИФЫ И ЦЕНЫ og1 (реальные факты, можно называть лиду):\n"
+        f"АКТУАЛЬНЫЕ ТАРИФЫ И ЦЕНЫ og1 (реальные факты; цифры - только если лид спросил о стоимости):\n"
         f"{catalog.tariff_price_summary()}\n\n"
         "Напиши одно короткое сообщение лиду (1-3 предложения) в стиле менеджера выше. "
         "Если лид спрашивает про тарифы или цену - НАЗОВИ конкретные тарифы и цену «от» из списка "
-        "выше (не уклоняйся к менеджеру вместо ответа). Не выдумывай цифры, которых нет в списке выше.\n\n"
+        "выше (не уклоняйся к менеджеру вместо ответа). Если про стоимость не спрашивал - цены не называй. "
+        "Не выдумывай цифры, которых нет в списке выше.\n\n"
         "Реплики «менеджер» в диалоге - это живой менеджер og1, который пишет с этого же аккаунта. "
         "Ты продолжаешь разговор от его лица: не здоровайся и не представляйся заново, не повторяй "
         "уже сказанное, отвечай на то, что лид сказал в ответ на слова менеджера."
@@ -291,3 +295,54 @@ def orientir_price(dialog_text: str) -> str:
 
 def status_answer(tariff: str, status: str) -> str:
     return STATUS_ANSWER_TEMPLATE.format(tariff=tariff, status=status)
+
+
+# --- имя лида для специалиста и Megabitra ------------------------------------------
+
+_NAME_WORD_RE = re.compile(r"[А-ЯЁA-Z][а-яёa-z]+(?:-[А-ЯЁA-Z][а-яёa-z]+)?")
+# Слова, которые пишут в имени профиля или в ответе, но это не имя
+_NOT_NAMES = {
+    "мама", "папа", "мамочка", "бабушка", "дедушка", "семья", "родитель", "родители", "admin", "user",
+    "меня", "зовут", "я", "это", "мое", "моё", "имя", "можно", "просто", "да", "нет", "ок", "хорошо",
+    "спасибо", "здравствуйте", "добрый", "день", "вечер", "утро", "привет", "обращаться", "ко", "мне",
+}
+# «Мама Димы», «Семья Ивановых» — это не имя того, кто пишет: спрашиваем
+_FAMILY_WORDS = {"мама", "папа", "мамочка", "бабушка", "дедушка", "семья", "родитель", "родители"}
+
+
+def _name_words(text: str, any_case: bool = False) -> list[str]:
+    words = []
+    for token in re.split(r"[\s,;/|]+", text or ""):
+        word = re.sub(r"^[^\wЁё]+|[^\wЁё]+$", "", token)  # эмодзи и знаки по краям
+        if word.isupper() and len(word) > 1 or any_case:
+            word = "-".join(part.capitalize() for part in word.split("-"))
+        if _NAME_WORD_RE.fullmatch(word) and word.lower() not in _NOT_NAMES:
+            words.append(word)
+    return words
+
+
+def clean_name(raw: str | None) -> str | None:
+    """Имя из профиля → «Фамилия Имя»: первые два слова, похожие на имя. В профиле бывает вся семья
+    («Шарафутдинова Марьям Шарафутдинов Ахмадгарей … (@nick)») — берём только первого человека.
+    Ничего похожего на имя (ник, цифры, эмодзи) — None: имя надо спросить."""
+    text = re.sub(r"\([^)]*\)|@\w+", " ", raw or "")
+    if any(w.strip(".,!").lower() in _FAMILY_WORDS for w in text.split()):
+        return None
+    words = _name_words(text)
+    return " ".join(words[:2]) or None
+
+
+def name_from_reply(text: str) -> str | None:
+    """Имя из ответа на «как к Вам обращаться?»: «меня зовут анна» → «Анна»."""
+    if "?" in (text or ""):  # вопрос, а не имя
+        return None
+    first = re.split(r"[,.!;\n]", text or "", maxsplit=1)[0]
+    words = _name_words(first, any_case=True)
+    return " ".join(words[:2]) if words and len(first.split()) <= 5 else None
+
+
+def summarize_request(dialog_text: str) -> str | None:
+    """Суть запроса клиента в 2-3 предложениях — в комментарий Megabitra вместо всей переписки."""
+    if not (dialog_text or "").strip():
+        return None
+    return llm.call_text(REQUEST_ESSENCE_PROMPT_OG1, dialog_text[-6000:], max_tokens=400)

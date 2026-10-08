@@ -272,6 +272,8 @@ def test_send_to_lead_falls_back_to_username():
 def _hot_lead_with_order(db_path, tg_id, username):
     with db.session(db_path) as conn:
         lead = db.get_or_create_lead(conn, tg_id=tg_id, username=username)
+        db.set_lead_name(conn, lead["id"], "Ольга Петрова")
+        lead = db.get_lead(conn, lead["id"])
         order = db.create_order(conn, lead_id=lead["id"], tariff="Аттестация", price=15000,
                                 department="приёмная_комиссия", needs_estimator=False, summary="Аттестация")
     return lead, order
@@ -465,6 +467,7 @@ def test_megabitra_payload_and_phone_format(tmp_path, monkeypatch):
     assert p["phone"] == "79991234567" and p["name"] == "Ольга" and p["email"] == "olga@mail.ru"
     assert p["flow"] == "100" and p["offer"] == "3" and p["ip"] == "1.2.3.4" and p["sub1"] == str(order["id"])
     assert "@p16" in p["comment"] and "после 18" in p["comment"]
+    assert "Запрос: Аттестация" in p["comment"]  # без сути от ИИ — сводка заявки
     with db.session(db_path) as conn:
         db.set_order_contact(conn, order["id"], "лучше в тг")
         no_phone = db.get_order(conn, order["id"])
@@ -526,7 +529,7 @@ def test_phone_sent_without_being_asked_goes_straight_to_specialist(tmp_path, mo
     with db.session(db_path) as conn:
         lead = db.get_or_create_lead(conn, tg_id=718, username="p18")
         db.append_dialog_context(conn, lead["id"], "бот", "Если хотите подробнее - оставьте контакты, специалист всё расскажет.")
-    chat = SimpleNamespace(id=718, username="p18", bot=False, is_self=False)
+    chat = SimpleNamespace(id=718, username="p18", first_name="Мария", bot=False, is_self=False)
     event = _Event(chat, "+381 64 555 1234, после 17")
     asyncio.run(main.handle_incoming(event, source="dm"))
     assert event.replies == [pipeline.CONTACT_THANKS_TEXT]  # номер не переспрашиваем
@@ -572,3 +575,74 @@ def test_userbot_reconnects_after_network_failures(tmp_path, monkeypatch):
 
     asyncio.run(run())
     assert client.starts == 3 and client.disconnects == 2
+
+
+def test_profile_name_cleanup():
+    import pipeline
+    family = "Шарафутдинова Марьям Шарафутдинов Ахмадгарей Камолова Фатима (@Fatima5c_Ahmad2m)"
+    assert pipeline.clean_name(family) == "Шарафутдинова Марьям"
+    assert pipeline.clean_name("Анна Смирнова") == "Анна Смирнова"
+    assert pipeline.clean_name("🌸Анна🌸") == "Анна"
+    for unclear in ("Mama_123", "мама Димы", "🌸🌸", "", None, "user2010"):
+        assert pipeline.clean_name(unclear) is None
+    assert pipeline.name_from_reply("меня зовут анна") == "Анна"
+    assert pipeline.name_from_reply("Ольга Петровна, спасибо") == "Ольга Петровна"
+    assert pipeline.name_from_reply("а когда позвонят?") is None
+
+
+def test_megabitra_comment_is_short_essence_not_dialog(tmp_path, monkeypatch):
+    import megabitra
+    db_path = _setup(tmp_path, monkeypatch)
+    lead, order = _hot_lead_with_order(db_path, 717, "p17")
+    with db.session(db_path) as conn:
+        for i in range(60):
+            db.append_dialog_context(conn, lead["id"], "лид", f"очень длинная реплика номер {i} " * 5)
+        db.set_lead_name(conn, lead["id"], "Шарафутдинова Марьям Шарафутдинов Ахмадгарей (@Fatima5c)")
+        db.set_order_contact(conn, order["id"], "+7 999 123-45-67")
+        order, lead = db.get_order(conn, order["id"]), db.get_lead(conn, lead["id"])
+    essence = "Сын в 7 классе, нужна аттестация. Хотят начать с января."
+    p = megabitra.build_payload(order, lead, "1.2.3.4", essence)
+    assert p["name"] == "Шарафутдинова Марьям"
+    assert essence in p["comment"] and "реплика" not in p["comment"] and "Переписка" not in p["comment"]
+    assert len(megabitra.build_payload(order, lead, "1.2.3.4", "х" * 2000)["comment"]) <= 800
+
+
+def test_unclear_name_is_asked_before_hand_off(tmp_path, monkeypatch):
+    db_path = _setup(tmp_path, monkeypatch)
+    sent = _patch_hot(monkeypatch, 88)
+    import pipeline
+    lead, order = _hot_lead_with_order(db_path, 718, "p18")
+    with db.session(db_path) as conn:
+        conn.execute("UPDATE leads SET name = ? WHERE id = ?", ("Mama_123", lead["id"]))
+    chat = SimpleNamespace(id=718, username="p18", bot=False, is_self=False)
+    event = _Event(chat, "+7 999 123-45-67, вечером")
+    asyncio.run(main.handle_incoming(event, source="dm"))
+    assert event.replies == [pipeline.NAME_REQUEST_TEXT] and sent == []
+    event2 = _Event(chat, "Меня зовут Алия", msg_id=2)
+    asyncio.run(main.handle_incoming(event2, source="dm"))
+    assert event2.replies == [pipeline.CONTACT_THANKS_TEXT]
+    with db.session(db_path) as conn:
+        saved, lead = db.get_order(conn, order["id"]), db.get_lead(conn, lead["id"])
+    assert saved["contact"] == "+7 999 123-45-67, вечером" and db.lead_person_name(lead) == "Алия"
+
+
+def test_silent_on_name_question_still_handed_off(tmp_path, monkeypatch):
+    db_path = _setup(tmp_path, monkeypatch)
+    sent = _patch_hot(monkeypatch, 88)
+    lead, order = _hot_lead_with_order(db_path, 719, "p19")
+    with db.session(db_path) as conn:
+        conn.execute("UPDATE leads SET name = NULL WHERE id = ?", (lead["id"],))
+        db.set_order_contact_draft(conn, order["id"], "+7 999 000-00-00")
+        conn.execute("UPDATE orders SET updated_at = '2000-01-01T00:00:00+00:00' WHERE id = ?", (order["id"],))
+        assert db.list_orders_for_reminders(conn) == []  # контакт дан — не напоминаем и не закрываем
+    replies = []
+
+    async def fake_send(userbot, chat_id, username, text):
+        replies.append(text)
+        return SimpleNamespace(id=1)
+
+    monkeypatch.setattr(runtime, "send_to_lead", fake_send)
+    asyncio.run(main.hand_off_unnamed())
+    with db.session(db_path) as conn:
+        assert db.get_order(conn, order["id"])["contact"] == "+7 999 000-00-00"
+    assert sent and "+7 999 000-00-00" in sent[0]

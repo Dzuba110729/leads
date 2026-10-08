@@ -73,21 +73,24 @@ def _platform(event) -> str:
 
 
 async def _notify_blocked(event, text: str) -> None:
-    if _platform(event) == "vk":
-        await alerts.notify_operators(text)
-    else:
-        await event.client.send_message(CONFIG.operator_chat, text)
+    # Раньше для ТГ слали прямо в OPERATOR_CHAT через userbot — числовой чат Telethon часто не находит
+    # (нет в кэше StringSession), и уведомление терялось. notify_operators сам пробует оба пути.
+    await alerts.notify_operators(text)
 
 
-async def process_lead_text(event, lead, text: str, who: str) -> None:
+async def process_lead_text(event, lead, text: str, who: str, saved: bool = False) -> None:
     """Ядро шагов 2-4, не зависящее от канала: реплика лида → guard → статус/контакт → скоринг →
     касание, эскалация или молчание. `event` — событие Telethon или любой канал с тем же
     интерфейсом (`chat_id`, `async reply(text)`, `platform`), например vk_messenger.VkChannel.
-    Входящее уже отмечено как обработанное (claim_incoming_message) до вызова."""
+    Входящее уже отмечено как обработанное (claim_incoming_message) до вызова.
+    saved=True — реплика уже лежит в dialog_context (повторный ответ после сбоя ИИ)."""
     tg_id = lead["tg_id"]
     username = lead["username"]
-    with db.session() as conn:
-        dialog_context = db.append_dialog_context(conn, lead["id"], "лид", text)
+    if saved:
+        dialog_context = lead["dialog_context"] or ""
+    else:
+        with db.session() as conn:
+            dialog_context = db.append_dialog_context(conn, lead["id"], "лид", text)
     if lead["manual_mode"]:
         return  # «Веду сам»: реплику сохранили для контекста, отвечает менеджер
 
@@ -142,13 +145,13 @@ async def process_lead_text(event, lead, text: str, who: str) -> None:
         return
 
     if guard_outage:
-        await alerts.report_llm_outage(who)
+        await alerts.report_llm_outage(who, lead["id"])
         return
 
     # Шаг 2.3: скоринг П1 - с учётом контекста диалога, не только последней реплики
     score_result = await asyncio.to_thread(pipeline.score_message, dialog_context)
     if score_result.source != "llm" and alerts.llm_configured():
-        await alerts.report_llm_outage(who)
+        await alerts.report_llm_outage(who, lead["id"])
         return
     if score_result.source == "llm":
         await alerts.report_llm_ok()
@@ -177,7 +180,7 @@ async def process_lead_text(event, lead, text: str, who: str) -> None:
         alerts.run_llm_step, pipeline.generate_touch, score_result.band, funnel_stage, dialog_context
     )
     if failed:  # generate_touch при сбое тихо подставляет шаблон — такой не шлём
-        await alerts.report_llm_outage(who)
+        await alerts.report_llm_outage(who, lead["id"])
         return
     await _reply(event, touch, lead_id=lead["id"])
     with db.session() as conn:
@@ -188,7 +191,7 @@ async def _close_politely(event, lead, dialog_context: str, who: str) -> None:
     """Лид отказался или вопрос уже решён: одно тёплое завершение вместо молчания, прогрев стоп."""
     closing, failed = await asyncio.to_thread(alerts.run_llm_step, pipeline.generate_closing, dialog_context)
     if failed or not closing:
-        await alerts.report_llm_outage(who)
+        await alerts.report_llm_outage(who, lead["id"])
         return
     await _reply(event, closing, lead_id=lead["id"])
     with db.session() as conn:
@@ -291,21 +294,42 @@ async def _take_contact_if_awaited(event, lead, text: str, who: str) -> bool:
         order = db.order_awaiting_contact(conn, lead["id"])
     if order is None:
         return False
-    # История без только что записанной реплики лида — чтобы понять, о чём бот уже спрашивал.
-    history = (lead["dialog_context"] or "")
-    step = pipeline.contact_step(text, history)
-    if step is None:
-        return False
-    follow_up = {
-        "ask_phone": pipeline.PHONE_NUMBER_REQUEST_TEXT,
-        "offer_alternatives": pipeline.alternatives_text(_platform(event)),
-        "ask_email": pipeline.EMAIL_REQUEST_TEXT,
-    }.get(step)
-    if follow_up:
-        await _reply(event, follow_up, lead_id=lead["id"])
-        return True
+    if order["contact_draft"]:
+        # Контакт уже дал, это ответ на «как к Вам обращаться?». Имя не разобрали — не переспрашиваем,
+        # передаём с именем из профиля: специалист уточнит сам.
+        with db.session() as conn:
+            db.set_lead_real_name(conn, lead["id"], pipeline.name_from_reply(text))
+        contact = order["contact_draft"]
+    else:
+        # История без только что записанной реплики лида — чтобы понять, о чём бот уже спрашивал.
+        history = (lead["dialog_context"] or "")
+        step = pipeline.contact_step(text, history)
+        if step is None:
+            return False
+        follow_up = {
+            "ask_phone": pipeline.PHONE_NUMBER_REQUEST_TEXT,
+            "offer_alternatives": pipeline.alternatives_text(_platform(event)),
+            "ask_email": pipeline.EMAIL_REQUEST_TEXT,
+        }.get(step)
+        if follow_up:
+            await _reply(event, follow_up, lead_id=lead["id"])
+            return True
+        with db.session() as conn:  # свежая запись: имя из профиля пишется уже после чтения lead
+            unnamed = db.lead_person_name(db.get_lead(conn, lead["id"])) is None
+            if unnamed:
+                db.set_order_contact_draft(conn, order["id"], text)
+        if unnamed:
+            await _reply(event, pipeline.NAME_REQUEST_TEXT, lead_id=lead["id"])
+            return True
+        contact = text
+    await _hand_off_contact(event, lead, order, contact, who)
+    return True
+
+
+async def _hand_off_contact(event, lead, order, contact: str, who: str) -> None:
+    """Контакт собран: в заявку, в Megabitra и карточкой в ленту готовых лидов; бот замолкает."""
     with db.session() as conn:
-        db.set_order_contact(conn, order["id"], text)
+        db.set_order_contact(conn, order["id"], contact)
         # Дальше разговор ведёт менеджер: бот не отвечает и не прогревает (как «Веду сам»).
         db.set_manual_mode(conn, lead["id"], True)
     logger.info("CONTACT lead=%s order=%s: контакт/время для связи получены", lead["tg_id"], order["id"])
@@ -327,11 +351,27 @@ async def _take_contact_if_awaited(event, lead, text: str, who: str) -> bool:
     if await ready_bot.send_ready_card(order["id"]) == 0:
         await alerts.notify_operators(
             f"📞 {who} ответил(а), когда и где удобно связаться — заявка №{order['id']} ({order['tariff']}).\n\n"
-            f"«{text}»\n\n"
+            f"«{contact}»\n\n"
             "Бот этому лиду больше не отвечает — свяжитесь и ведите диалог сами.\n"
             f"Карточка в @{CONFIG.bot_username} не дошла — нажмите там /start."
         )
-    return True
+
+
+NAME_WAIT_MINUTES = 30
+
+
+async def hand_off_unnamed() -> None:
+    """Лид дал контакт, но на «как к Вам обращаться?» молчит — не теряем его: через полчаса
+    передаём специалисту с именем из профиля."""
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=NAME_WAIT_MINUTES)).isoformat()
+    with db.session() as conn:
+        waiting = [(o, db.get_lead(conn, o["lead_id"])) for o in db.orders_waiting_name(conn, cutoff)]
+    for order, lead in waiting:
+        logger.info("CONTACT lead=%s order=%s: имя не назвали, передаём без него", lead["tg_id"], order["id"])
+        who = lead["name"] or (f"@{lead['username']}" if lead["username"] else f"ID {lead['tg_id']}")
+        await _hand_off_contact(LeadChannel(lead), lead, order, order["contact_draft"], who)
 
 
 async def _escalate(event, lead, dialog_text: str, score_result: pipeline.ScoreResult, who: str = "",
@@ -347,7 +387,7 @@ async def _escalate(event, lead, dialog_text: str, score_result: pipeline.ScoreR
 
     extracted, failed = await asyncio.to_thread(alerts.run_llm_step, pipeline.extract_order, dialog_text)
     if failed:  # без ИИ заявка собралась бы из догадок — ждём, пока ИИ заработает
-        await alerts.report_llm_outage(who or f"ID {lead['tg_id']}")
+        await alerts.report_llm_outage(who or f"ID {lead['tg_id']}", lead["id"])
         return
     with db.session() as conn:
         order = db.create_order(
@@ -382,6 +422,83 @@ async def _reply(event, text: str, lead_id: int | None = None) -> None:
         logger.info("[DRY_RUN] would reply: %s", text)
         return
     runtime.remember_auto_sent(event.chat_id, await event.reply(text))
+
+
+# --- ответ тем, кто писал во время сбоя ИИ -------------------------------------------
+
+MISSED_RETRY_EVERY = 300  # с
+DIALOG_ROLES = ("лид", "бот", "менеджер")
+
+
+def last_turn(dialog_context: str) -> tuple[str | None, str]:
+    """Кто сказал последнюю реплику и её текст. Многострочная реплика в dialog_context разбита
+    на строки, поэтому ищем последнюю строку с ролью и склеиваем всё после неё."""
+    lines = (dialog_context or "").split("\n")
+    for i in range(len(lines) - 1, -1, -1):
+        for role in DIALOG_ROLES:
+            prefix = f"{role}: "
+            if lines[i].startswith(prefix):
+                return role, "\n".join([lines[i][len(prefix):], *lines[i + 1:]]).strip()
+    return None, ""
+
+
+class LeadChannel:
+    """Канал ответа для process_lead_text без входящего события: пишет лиду сам (ТГ или очередь VK)."""
+
+    def __init__(self, lead) -> None:
+        self.chat_id = lead["tg_id"]
+        self.username = lead["username"]
+        self.platform = "vk" if int(lead["tg_id"]) < 0 else "tg"
+
+    async def reply(self, text: str):
+        return await runtime.send_to_lead(runtime.userbot, self.chat_id, self.username, text)
+
+
+async def retry_missed_replies() -> list[str]:
+    """Отвечает тем, кто писал во время сбоя ИИ и с тех пор ответа не получил. Возвращает, кому ответил.
+    Ответ уже не нужен, если последним в диалоге написал бот или менеджер, или лида ведут вручную."""
+    answered = []
+    for item in alerts.missed_leads():
+        with db.session() as conn:
+            lead = db.get_lead(conn, item["lead_id"])
+        role, text = last_turn(lead["dialog_context"] if lead else "")
+        if lead is None or lead["blocked"] or lead["manual_mode"] or role != "лид" or not text:
+            alerts.forget_missed(item["lead_id"])
+            continue
+        # Снимаем до обработки: если ИИ опять упадёт, process_lead_text вернёт лида в список сам
+        alerts.forget_missed(item["lead_id"])
+        try:
+            await process_lead_text(LeadChannel(lead), lead, text, item["who"], saved=True)
+        except Exception:
+            logger.exception("retry after outage failed lead=%s", lead["tg_id"])
+            alerts.remember_missed(lead["id"], item["who"])
+            continue
+        with db.session() as conn:
+            fresh = db.get_lead(conn, lead["id"])
+        if last_turn(fresh["dialog_context"])[0] == "бот":
+            logger.info("RETRY-AFTER-OUTAGE lead=%s: ответ отправлен", lead["tg_id"])
+            answered.append(item["who"])
+    return answered
+
+
+async def missed_replies_task() -> None:
+    """Раз в несколько минут: доотправить предупреждения, не дошедшие без связи, и ответить тем,
+    кто писал во время сбоя. Без этого человек, который больше не напишет, так и остаётся без ответа."""
+    while True:
+        await asyncio.sleep(MISSED_RETRY_EVERY)
+        try:
+            await alerts.resend_undelivered()
+            if runtime.userbot is not None and runtime.userbot.is_connected():
+                await hand_off_unnamed()
+            if runtime.userbot is None or not runtime.userbot.is_connected() or not alerts.missed_leads():
+                continue
+            answered = await retry_missed_replies()
+            if answered:
+                await alerts.notify_operators(
+                    f"↩️ Ответил после сбоя ИИ тем, кто писал, пока он не работал: {', '.join(answered)}."
+                )
+        except Exception:
+            logger.exception("missed replies task failed")
 
 
 def warmup_silence_days(last_touch_at: str | None) -> int | None:
@@ -568,7 +685,7 @@ async def main() -> None:
     cashier_bot = bot_module.build_bot() if CONFIG.cashier_bot_active else None
     userbot = build_userbot()
 
-    tasks = [daily_warmup_task(userbot), reminders.run_forever(cashier_bot, userbot)]
+    tasks = [daily_warmup_task(userbot), reminders.run_forever(cashier_bot, userbot), missed_replies_task()]
 
     if userbot is not None:
 
