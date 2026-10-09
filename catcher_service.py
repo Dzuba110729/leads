@@ -4,8 +4,9 @@
 делить им нечего — поэтому ТГ и ВК обходятся независимо и могут идти одновременно.
 Внутри платформы сначала выгружаются все чаты (у ТГ — одним подключением), потом идёт разбор ИИ:
 выгрузка занимает минуты, а разбор — основное время, и пусть он не держит сессию открытой.
-Разбор у обеих платформ общий и идёт по одному источнику за раз — чтобы два обхода
-не жгли лимит подписки Claude параллельно.
+Разбор у обеих платформ общий: одновременно разбираются до CATCHER_PARALLEL_SOURCES чатов,
+а число вызовов модели ограничено общим потолком CATCHER_LLM_WORKERS — два обхода сразу
+не жгут лимит подписки Claude сильнее, чем один.
 
 Выгрузка Telegram идёт на event loop (Telethon асинхронный), VK и прогон через LLM —
 в отдельном потоке со своим sqlite-соединением, чтобы не морозить процесс.
@@ -45,7 +46,7 @@ class SourceRunResult:
 
 # Замки создаются лениво: asyncio.Lock нельзя заводить до запуска event loop.
 _platform_locks: dict[str, asyncio.Lock] = {}
-_llm_lock: asyncio.Lock | None = None
+_llm_lock: asyncio.Semaphore | None = None
 
 
 def _platform_lock(platform: str) -> asyncio.Lock:
@@ -54,10 +55,10 @@ def _platform_lock(platform: str) -> asyncio.Lock:
     return _platform_locks[platform]
 
 
-def _analysis_lock() -> asyncio.Lock:
+def _analysis_lock() -> asyncio.Semaphore:
     global _llm_lock
     if _llm_lock is None:
-        _llm_lock = asyncio.Lock()
+        _llm_lock = asyncio.Semaphore(max(1, CONFIG.catcher_parallel_sources))
     return _llm_lock
 
 
@@ -208,9 +209,7 @@ async def run_platform(platform: str, source_ids: list[int] | None = None) -> li
                                                    error=f"подключение: {exc}", platform=platform))
 
         # Разбираем и чаты с ошибкой выгрузки: там могли остаться неразобранные сообщения прошлых обходов.
-        for result in results:
-            if not result.skipped:
-                await _analyze(result)
+        await asyncio.gather(*(_analyze(r) for r in results if not r.skipped))
         return results
 
 

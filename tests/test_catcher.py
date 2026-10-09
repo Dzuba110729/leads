@@ -299,7 +299,9 @@ def test_run_platform_fetches_everything_before_analysis(tmp_path, monkeypatch):
     monkeypatch.setattr(catcher_service.catcher_pipeline, "process_source", fake_process)
     results = asyncio.run(catcher_service.run_sources(None, ("tg",)))
     assert [r.source_id for r in results] == [a, b]
-    assert events == [("fetch", a), ("fetch", b), ("analyze", a), ("analyze", b)]
+    # Чаты разбираются параллельно (CATCHER_PARALLEL_SOURCES), порядок разбора не фиксирован.
+    assert events[:2] == [("fetch", a), ("fetch", b)]
+    assert sorted(events[2:]) == [("analyze", a), ("analyze", b)]
 
 
 def _vk_run(tmp_path, monkeypatch, fetch):

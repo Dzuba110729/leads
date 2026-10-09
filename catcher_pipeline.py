@@ -272,14 +272,19 @@ def run_p1_on_batch(messages: list, reply_map: dict | None = None) -> tuple[list
         return [], True
 
     system_prompt = P1_SYSTEM_PROMPT.format(icp=ICP_OG1)
-    result = _llm(system_prompt, _format_batch(messages, reply_map), max_tokens=2048)
-    if result:
+    # Модель изредка отвечает не JSON-ом (≈2% вызовов) — повтор почти всегда чистый, а без него
+    # пачка целиком ждала следующего обхода.
+    for attempt in range(2):
+        result = _llm(system_prompt, _format_batch(messages, reply_map), max_tokens=2048)
+        if not result:
+            break
         try:
             candidates = json.loads(_extract_json(result))
             if isinstance(candidates, list):
                 return candidates, True
         except json.JSONDecodeError:
-            logger.warning("П1: не удалось распарсить ответ LLM как JSON, пачка останется неразобранной")
+            pass
+        logger.warning("П1: ответ не разобрался как JSON (попытка %s): %.300r", attempt + 1, result)
 
     # Модель не отработала — кандидатов не выдумываем. Раньше здесь был поиск по словам-сигналам,
     # но подстрочное совпадение (например, «со» внутри «состоянии») при отключении ИИ заваливало
