@@ -16,6 +16,7 @@ from prompts import (
     REQUEST_ESSENCE_PROMPT_OG1,
     BUSINESS_CONTEXT_OG1,
     CLOSING_PROMPT_OG1,
+    TRUST_REPLY_PROMPT_OG1,
     HEURISTIC_SCORE_KEYWORDS,
     ORIENTIR_TEMPLATE,
     SCORING_SYSTEM_PROMPT,
@@ -43,6 +44,7 @@ class ScoreResult:
     reasoning: str
     source: str  # 'llm' | 'heuristic'
     refusal: bool = False  # лид отказался / вопрос уже решён — вежливо закрываем диалог
+    trust_doubt: bool = False  # лид сомневается в лицензии/аккредитации или считает нас мошенниками
 
 
 def band_for_score(score: int) -> str:
@@ -201,6 +203,7 @@ def score_message(text: str) -> ScoreResult:
             reasoning=str(result.get("reasoning", "")),
             source="llm",
             refusal=bool(result.get("refusal", False)),
+            trust_doubt=bool(result.get("trust_doubt", False)),
         )
     score = _heuristic_score(text)
     return ScoreResult(score=score, band=band_for_score(score), reasoning="эвристика по ключевым словам", source="heuristic")
@@ -229,6 +232,11 @@ def generate_touch(band: str, funnel_stage: str, dialog_text: str) -> str:
 def generate_closing(dialog_text: str) -> str | None:
     """Короткое тёплое завершение диалога после отказа; None, если ИИ не ответил (шаблон не шлём)."""
     return llm.call_text(f"{TEMPLATE_A_OG1}\n\n{MANAGER_STYLE_OG1}\n\n{CLOSING_PROMPT_OG1}", dialog_text)
+
+
+def generate_trust_reply(dialog_text: str) -> str | None:
+    """Ответ на сомнение в лицензии/аккредитации; None, если ИИ не ответил (шаблон не шлём)."""
+    return llm.call_text(f"{TEMPLATE_A_OG1}\n\n{MANAGER_STYLE_OG1}\n\n{TRUST_REPLY_PROMPT_OG1}", dialog_text)
 
 
 def warmup_step_text(silence_days: int) -> str | None:

@@ -166,6 +166,18 @@ def test_cold_without_refusal_stays_silent(tmp_path, monkeypatch):
     assert event.replies == []
 
 
+def test_trust_doubt_gets_answer_and_operator_alert(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    notes = _patch_llm(monkeypatch, score=15)
+    monkeypatch.setattr(main.pipeline, "score_message", lambda ctx: pipeline.ScoreResult(
+        score=15, band="cold", reasoning="", source="llm", trust_doubt=True))
+    monkeypatch.setattr(main.pipeline, "generate_trust_reply", lambda ctx: "Возможно, нас путают с onlineschool-1.ru.")
+    event = _Event(SimpleNamespace(id=713, username="n", bot=False, is_self=False), "Вы мошенники?")
+    asyncio.run(main.handle_incoming(event, source="dm"))
+    assert event.replies == ["Возможно, нас путают с onlineschool-1.ru."]
+    assert any("сомневается" in n for n in notes)
+
+
 def test_same_message_is_not_handled_twice(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch)
     _patch_llm(monkeypatch, score=50)

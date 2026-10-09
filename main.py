@@ -163,6 +163,10 @@ async def process_lead_text(event, lead, text: str, who: str, saved: bool = Fals
     with db.session() as conn:
         db.set_lead_score(conn, lead["id"], score_result.score)
 
+    if score_result.trust_doubt:
+        await _answer_trust_doubt(event, lead, dialog_context, who)
+        return
+
     if score_result.band == "cold":
         if score_result.refusal and not lead["declined_at"]:
             await _close_politely(event, lead, dialog_context, who)
@@ -197,6 +201,21 @@ async def _close_politely(event, lead, dialog_context: str, who: str) -> None:
     with db.session() as conn:
         db.mark_declined(conn, lead["id"])
     logger.info("DECLINED lead=%s: отказ, отправлено вежливое завершение", lead["tg_id"])
+
+
+async def _answer_trust_doubt(event, lead, dialog_context: str, who: str) -> None:
+    """Лид сомневается в лицензии/аккредитации или зовёт нас мошенниками: молчание выглядит как
+    признание, поэтому бот спокойно отвечает (нас путают с onlineschool-1.ru) и зовёт менеджера."""
+    reply, failed = await asyncio.to_thread(alerts.run_llm_step, pipeline.generate_trust_reply, dialog_context)
+    if failed or not reply:
+        await alerts.report_llm_outage(who, lead["id"])
+        return
+    await _reply(event, reply, lead_id=lead["id"])
+    logger.info("TRUST lead=%s: сомнение в школе, отправлен ответ", lead["tg_id"])
+    await alerts.notify_operators(
+        f"⚠️ {who} сомневается в школе (лицензия/аккредитация, «мошенники?»). Бот ответил, "
+        f"что нас могут путать с onlineschool-1.ru. Загляните в переписку — возможно, стоит подключиться самому."
+    )
 
 
 # Голосовые длиннее не расшифровываем: это минуты работы процессора ради одного сообщения
