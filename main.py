@@ -13,12 +13,14 @@ import uvicorn
 from telethon import TelegramClient, events
 
 import alerts
+import contact_reminders
 import bot as bot_module
 import db
 import guard
 import pipeline
 import reminders
 import runtime
+import site_prices
 import voice
 from config import CONFIG
 from crm import app as crm_app
@@ -141,7 +143,11 @@ async def process_lead_text(event, lead, text: str, who: str, saved: bool = Fals
         with db.session() as conn:
             db.set_lead_score(conn, lead["id"], agreed.score)
         logger.info("AGREED lead=%s: согласился на связь со специалистом", tg_id)
-        await _escalate(event, lead, dialog_context, agreed, who)
+        # Менеджер уже пообещал передать контакты — номер не спрашиваем, передаём переписку как есть.
+        promised = pipeline.manager_promised_handoff(lead["dialog_context"] or "")
+        await _escalate(event, lead, dialog_context, agreed, who,
+                        contact_text=pipeline.chat_contact(_platform(event), username) if promised else None,
+                        promised=promised)
         return
 
     if guard_outage:
@@ -333,6 +339,12 @@ async def _take_contact_if_awaited(event, lead, text: str, who: str) -> bool:
         if follow_up:
             await _reply(event, follow_up, lead_id=lead["id"])
             return True
+        if not pipeline.has_phone_or_email(text):
+            # «Пишите в сообщении», «только переписка» — номер и имя не спрашиваем: специалист
+            # напишет сюда же, в этот мессенджер.
+            contact = f"{pipeline.chat_contact(_platform(event), lead['username'])}. Лид: «{text.strip()}»"
+            await _hand_off_contact(event, lead, order, contact, who)
+            return True
         with db.session() as conn:  # свежая запись: имя из профиля пишется уже после чтения lead
             unnamed = db.lead_person_name(db.get_lead(conn, lead["id"])) is None
             if unnamed:
@@ -394,12 +406,22 @@ async def hand_off_unnamed() -> None:
 
 
 async def _escalate(event, lead, dialog_text: str, score_result: pipeline.ScoreResult, who: str = "",
-                    contact_text: str | None = None) -> None:
+                    contact_text: str | None = None, promised: bool = False) -> None:
     """contact_text — лид сам сразу прислал контакт (телефон/почту): заявку заводим и сразу передаём
-    специалисту, не переспрашивая номер."""
+    специалисту, не переспрашивая номер. promised — менеджер сам пообещал передать контакты, лид
+    согласился (или лид сказал «только переписка»): contact_text тогда «писать здесь», передаём без
+    вопросов про номер и имя."""
+    # Лид уже сказал, что звонить нельзя (только переписка), — номер не просим, передаём тг/ВК.
+    if not promised and contact_text is None and pipeline.prefers_text(dialog_text):
+        promised = True
+        contact_text = pipeline.chat_contact(_platform(event), lead["username"]) + " - звонить нельзя, только переписка"
+        logger.info("TEXT-ONLY lead=%s: только переписка, передаём без номера", lead["tg_id"])
     # Уже просили номер по открытой заявке — не плодим вторую, просто напоминаем.
     with db.session() as conn:
         pending = db.order_awaiting_contact(conn, lead["id"])
+    if pending is not None and promised:
+        await _hand_off_contact(event, lead, pending, contact_text, who or f"ID {lead['tg_id']}")
+        return
     if pending is not None:
         await _reply(event, pipeline.CALL_REQUEST_AGAIN_TEXT, lead_id=lead["id"])
         return
@@ -421,6 +443,9 @@ async def _escalate(event, lead, dialog_text: str, score_result: pipeline.ScoreR
         db.create_handoff(conn, order["id"], lead["id"], score_result.score, extracted.summary)
 
     logger.info("ESCALATE lead=%s order=%s tariff=%s", lead["tg_id"], order["id"], extracted.tariff_name)
+    if promised:
+        await _hand_off_contact(event, lead, order, contact_text, who or f"ID {lead['tg_id']}")
+        return
     if contact_text is not None:
         await _take_contact_if_awaited(event, lead, contact_text, who or f"ID {lead['tg_id']}")
         return
@@ -509,6 +534,7 @@ async def missed_replies_task() -> None:
             await alerts.resend_undelivered()
             if runtime.userbot is not None and runtime.userbot.is_connected():
                 await hand_off_unnamed()
+                await contact_reminders.run_once()
             if runtime.userbot is None or not runtime.userbot.is_connected() or not alerts.missed_leads():
                 continue
             answered = await retry_missed_replies()
@@ -704,7 +730,8 @@ async def main() -> None:
     cashier_bot = bot_module.build_bot() if CONFIG.cashier_bot_active else None
     userbot = build_userbot()
 
-    tasks = [daily_warmup_task(userbot), reminders.run_forever(cashier_bot, userbot), missed_replies_task()]
+    tasks = [daily_warmup_task(userbot), reminders.run_forever(cashier_bot, userbot), missed_replies_task(),
+             site_prices.refresh_task()]
 
     if userbot is not None:
 

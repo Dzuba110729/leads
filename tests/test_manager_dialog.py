@@ -398,7 +398,8 @@ def test_contact_steps_phone_first():
     assert pipeline.contact_step("В тг можно звонить.", "") == "done"
     assert pipeline.contact_step("вечером после 18", "") == "ask_phone"
     assert pipeline.contact_step("после 19", asked_phone) == "offer_alternatives"
-    assert pipeline.contact_step("не хочу давать номер", "") == "offer_alternatives"
+    assert pipeline.contact_step("не хочу давать номер", "") == "done"  # только переписка — передаём тг
+    assert pipeline.contact_step("Пишите в сообщении", "") == "done"
     assert pipeline.contact_step("лучше по почте", offered) == "ask_email"
     assert pipeline.contact_step("mama@mail.ru", offered) == "done"
     assert pipeline.contact_step("а сколько стоит?", "") is None
@@ -529,6 +530,79 @@ def test_yes_to_offer_escalates_even_with_low_score(tmp_path, monkeypatch):
     event = _Event(chat, "Да, давайте")
     asyncio.run(main.handle_incoming(event, source="dm"))
     assert event.replies == [pipeline.CALL_REQUEST_TEXT]
+
+
+def test_yes_after_manager_promised_handoff_passes_contact_without_asking_phone(tmp_path, monkeypatch):
+    import pipeline
+    db_path = _setup(tmp_path, monkeypatch)
+    _patch_hot(monkeypatch, 60)
+    monkeypatch.setattr(pipeline, "extract_order", lambda text: SimpleNamespace(
+        tariff_name="Аттестация", price=None, department="приёмная_комиссия", needs_estimator=False,
+        summary="11 класс, СО, ЕГЭ"))
+    with db.session(db_path) as conn:
+        lead = db.get_or_create_lead(conn, tg_id=719, username="Elllh11")
+        db.append_dialog_context(conn, lead["id"], "лид", "У нас очень плохая связь, удобнее переписка.")
+        db.append_dialog_context(conn, lead["id"], "менеджер",
+                                 "я тогда передам ваши контакты специалисту и он подробнее напишет и расскажет, хорошо?")
+    chat = SimpleNamespace(id=719, username="Elllh11", first_name="El🍀", bot=False, is_self=False)
+    for answer in ("Хорошо, спасибо", "Спасибо, буду ждать"):
+        assert pipeline.accepted_specialist_offer(_lead(db_path, 719)["dialog_context"], answer), answer
+    event = _Event(chat, "Хорошо, спасибо")
+    asyncio.run(main.handle_incoming(event, source="dm"))
+    assert event.replies == [pipeline.CONTACT_THANKS_TEXT]  # ни номера, ни «как обращаться»
+    with db.session(db_path) as conn:
+        order = conn.execute("SELECT * FROM orders").fetchone()
+        assert "@Elllh11" in order["contact"]
+    assert _lead(db_path, 719)["manual_mode"] == 1
+
+
+def _order_stub(monkeypatch):
+    import pipeline
+    monkeypatch.setattr(pipeline, "extract_order", lambda text: SimpleNamespace(
+        tariff_name="Аттестация", price=None, department="приёмная_комиссия", needs_estimator=False,
+        summary="аттестация за год"))
+
+
+def test_text_only_lead_is_handed_off_on_escalation_without_phone_request(tmp_path, monkeypatch):
+    import pipeline
+    db_path = _setup(tmp_path, monkeypatch)
+    _patch_hot(monkeypatch, 85)
+    _order_stub(monkeypatch)
+    with db.session(db_path) as conn:
+        lead = db.get_or_create_lead(conn, tg_id=720, username="valeriatkachuk")
+        db.append_dialog_context(conn, lead["id"], "бот", "Удобно будет, если специалист созвонится и расскажет подробнее?")
+    chat = SimpleNamespace(id=720, username="valeriatkachuk", first_name="Valeria", bot=False, is_self=False)
+    event = _Event(chat, "Я смогу только в переписке, так как у меня нет возможности звонков, нахожусь за пределами РФ.")
+    asyncio.run(main.handle_incoming(event, source="dm"))
+    assert event.replies == [pipeline.CONTACT_THANKS_TEXT]
+    with db.session(db_path) as conn:
+        assert "@valeriatkachuk" in conn.execute("SELECT contact FROM orders").fetchone()["contact"]
+    assert _lead(db_path, 720)["manual_mode"] == 1
+
+
+def test_write_in_messages_answer_to_phone_request_hands_off(tmp_path, monkeypatch):
+    import pipeline
+    db_path = _setup(tmp_path, monkeypatch)
+    _patch_hot(monkeypatch, 85)
+    _order_stub(monkeypatch)
+    with db.session(db_path) as conn:
+        lead = db.get_or_create_lead(conn, tg_id=721, username="v2")
+        db.append_dialog_context(conn, lead["id"], "бот", "Удобно будет, если специалист позвонит?")
+    chat = SimpleNamespace(id=721, username="v2", first_name="Valeria", bot=False, is_self=False)
+    first = _Event(chat, "Да, давайте", msg_id=1)
+    asyncio.run(main.handle_incoming(first, source="dm"))
+    assert first.replies == [pipeline.CALL_REQUEST_TEXT]
+    second = _Event(chat, "Пишите в сообщении", msg_id=2)
+    asyncio.run(main.handle_incoming(second, source="dm"))
+    assert second.replies == [pipeline.CONTACT_THANKS_TEXT]
+    with db.session(db_path) as conn:
+        assert "@v2" in conn.execute("SELECT contact FROM orders").fetchone()["contact"]
+
+
+def test_prefers_text_reads_only_lead_lines():
+    import pipeline
+    assert pipeline.prefers_text("бот: Звоним?\nлид: у нас плохая связь,\nлучше в переписке")
+    assert not pipeline.prefers_text("бот: могу расписать здесь в переписке\nлид: давайте")
 
 
 def test_phone_sent_without_being_asked_goes_straight_to_specialist(tmp_path, monkeypatch):

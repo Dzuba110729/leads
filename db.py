@@ -153,6 +153,8 @@ ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "ready_msgs": "TEXT", "passed_at": "TEXT", "passed_by": "TEXT",
         # Megabitra: id лида там и строка результата для карточки («лид #123 принят» / причина)
         "megabitra_id": "TEXT", "megabitra_result": "TEXT",
+        # напоминания готовому лиду, который не ответил на просьбу о контакте (contact_reminders.py)
+        "contact_reminder_stage": "INTEGER NOT NULL DEFAULT 0", "contact_reminded_at": "TEXT",
     },
     "handoff": {},
     "meta": {},
@@ -588,6 +590,22 @@ def orders_waiting_name(conn: sqlite3.Connection, older_than: str) -> list[sqlit
            AND updated_at < ?""",
         (older_than,),
     ).fetchall()
+
+
+def orders_for_contact_reminders(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Готовые лиды, которых попросили о контакте, а они молчат: открытая заявка без контакта,
+    бот не на паузе («Веду сам»), лид не заблокирован и не отказался. Поля лида — с префиксом lead_."""
+    return conn.execute(
+        """SELECT o.*, l.tg_id AS lead_tg_id, l.last_seen_at AS lead_last_seen_at
+           FROM orders o JOIN leads l ON l.id = o.lead_id
+           WHERE o.closed = 0 AND o.status = 'заявка' AND o.contact IS NULL AND o.contact_draft IS NULL
+             AND l.manual_mode = 0 AND l.blocked = 0 AND l.declined_at IS NULL"""
+    ).fetchall()
+
+
+def set_contact_reminder(conn: sqlite3.Connection, order_id: int, stage: int, at: str | None) -> None:
+    conn.execute("UPDATE orders SET contact_reminder_stage = ?, contact_reminded_at = ? WHERE id = ?",
+                 (stage, at, order_id))
 
 
 def bump_order_reminder(conn: sqlite3.Connection, order_id: int, stage: int) -> None:

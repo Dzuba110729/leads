@@ -252,14 +252,12 @@ def test_vk_hot_lead_contact_and_card_with_vk_link(tmp_path, monkeypatch):
     assert session.sent[-1] == (222, pipeline.CALL_REQUEST_TEXT)
     session.items.append(_in(len(session.items) + 1, "не хочу давать номер", peer=222))
     _run(session, peer=222, path="elenell", name="Алёна")
-    assert session.sent[-1] == (222, pipeline.ALTERNATIVES_TEXT_VK)  # «здесь, в ВК», а не «в тг»
-    session.items.append(_in(len(session.items) + 1, "пишите сюда, вечером", peer=222))
-    _run(session, peer=222, path="elenell", name="Алёна")
+    # без номера — только переписка: сразу передаём специалисту «писать здесь, в ВК»
     assert session.sent[-1] == (222, pipeline.CONTACT_THANKS_TEXT)
     with db.session(db_path) as conn:
         lead = conn.execute("SELECT * FROM leads WHERE vk_id = 222").fetchone()
         order = conn.execute("SELECT * FROM orders").fetchone()
-    assert lead["manual_mode"] == 1 and order["contact"] == "пишите сюда, вечером"
+    assert lead["manual_mode"] == 1 and "в ВК" in order["contact"] and "в тг" not in order["contact"]
     card = ready_bot.card_text(order, lead)
     assert "https://vk.com/elenell" in card and "Алёна" in card
     # в ручном режиме бот молчит, но историю пишет

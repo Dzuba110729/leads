@@ -1,5 +1,8 @@
 """Прайс og1 (см. og1/PLAN.md п.1) + маршрутизация заявки в отдел.
 
+Актуальные цены и акции бот берёт с сайта раз в сутки (site_prices.py). Цифры ниже — запасные:
+на случай, если сайт ещё ни разу не прочитали или его переверстали.
+
 Цены — реальные факты с сайта og1.ru. Сетка по классам для "Школьный"/"Ученический" сверена
 2026-08-12 с og1.ru/tarif-shkolniy и og1.ru/tarif-uchenicheskij (см. GRADE_PRICING,
 БРИФ_OG1_ЗАПОЛНЕННЫЙ.md п.1.3). Ставка репетиторов для движка КП (kp.py) — подтверждена
@@ -50,8 +53,29 @@ GRADE_PRICING: dict[str, dict[int, float]] = {
 
 
 def price_for_grade(tariff_name: str, grade: int) -> float | None:
-    """Точная цена по классу для тарифов с сеткой (Школьный/Ученический). None, если не найдено."""
+    """Точная цена по классу для тарифов с сеткой (Школьный/Ученический): с сайта (со скидкой, если
+    она есть), иначе из запасной сетки ниже. None, если не найдено."""
+    import site_prices
+
+    data = site_prices.load()
+    p = (data or {}).get("grades", {}).get(tariff_name, {}).get(str(grade))
+    if p:
+        return float(p["sale"] or p["price"])
     return GRADE_PRICING.get(tariff_name, {}).get(grade)
+
+
+def current_min_price(tariff: Tariff) -> float | None:
+    """Цена «от» для заявки: с сайта (минимум по классам с учётом скидки, или цена «Аттестации»),
+    иначе из запасного прайса."""
+    import site_prices
+
+    data = site_prices.load() or {}
+    grades = data.get("grades", {}).get(tariff.name)
+    if grades:
+        return float(min(p["sale"] or p["price"] for p in grades.values()))
+    if tariff.name == "Аттестация" and (data.get("attestation") or {}).get("price"):
+        return float(data["attestation"]["price"])
+    return tariff.price_min
 
 
 # Ставка для движка КП (kp.py) — от 950 ₽/час, подтверждено заказчиком, единая на все предметы/уровни
@@ -78,8 +102,14 @@ def route_department(tariff: Tariff | None) -> str:
 
 
 def tariff_price_summary() -> str:
-    """Короткая сводка тарифов+цен для промпта (см. БРИФ_OG1_ЗАПОЛНЕННЫЙ.md п.1.3) -
-    чтобы бот называл реальные цифры лиду, а не отправлял к менеджеру за любой цифрой."""
+    """Сводка тарифов+цен для промпта — чтобы бот называл реальные цифры лиду, а не отправлял к
+    менеджеру за любой цифрой. Цены по классам и акции — с сайта og1.ru (site_prices.py, раз в сутки);
+    пока с сайта ничего не получено — запасной прайс ниже."""
+    import site_prices
+
+    from_site = site_prices.summary_for_prompt()
+    if from_site:
+        return from_site
     lines = []
     for tariff in TARIFFS:
         lines.append(f"- {tariff.name} ({tariff.format}): {tariff.price_label()}")

@@ -93,15 +93,20 @@ PHONE_REFUSAL_MARKERS = (
     "не звон", "без звон", "не хочу по телефон", "не по телефон", "не удобно говорить",
     "неудобно говорить", "не могу говорить", "не хочу давать", "не дам номер", "без номер",
     "не люблю звон", "лучше не звон", "лучше напиш", "лучше перепис", "только перепис",
+    "только в перепис", "в переписке", "нет возможности звон", "нет возможности говор", "не смогу звон",
+    "не смогу говор", "без звонк", "плохая связь", "связь плох", "плохо со связью", "плохой связ",
+    "телефонный разговор невозможен", "разговор, к сожалению, невозможен",
 )
 
 # Мессенджеры и почта: способ связи без номера телефона.
 _MESSENGER_MARKERS = ("телеграм", "telegram", "тг", "здесь", "сюда", "ватсап", "вотсап", "вацап",
-                      "whatsapp", "вайбер", "viber", "max", "почт", "email", "e-mail", "вконтакт", "в вк")
+                      "whatsapp", "вайбер", "viber", "max", "почт", "email", "e-mail", "вконтакт", "в вк",
+                      "сообщени", "перепис", "пишите", "напишите", "в чат")
 
 # Ответ на «когда и где удобно связаться» без номера: канал связи или время.
 CONTACT_MARKERS = (
-    "телеграм", "telegram", "тг", "здесь", "сюда", "в этом чате", "в личк",
+    "телеграм", "telegram", "тг", "здесь", "сюда", "в этом чате", "в личк", "сообщени", "перепис",
+    "пишите", "напишите",
     "ватсап", "вотсап", "вацап", "whatsapp", "вайбер", "viber", "max", "вконтакт", "в вк",
     "звон", "номер", "почт", "email", "e-mail",
     "утр", "днём", "днем", "вечер", "обед", "после", "будн", "выходн", "завтра", "сегодня",
@@ -126,8 +131,10 @@ def contact_step(text: str, dialog_context: str) -> str | None:
     if extract_phone(text) or EMAIL_RE.search(text):
         return "done"
     offered = ALTERNATIVES_TEXT in (dialog_context or "") or ALTERNATIVES_TEXT_VK in (dialog_context or "")
+    # Звонить нельзя («только переписка», «пишите в сообщении») — передаём специалисту переписку
+    # в этом же мессенджере, не переспрашивая номер.
     if refuses_phone:
-        return "done" if offered else "offer_alternatives"
+        return "done"
     if _mentions(text, ("почт", "email", "e-mail", "мейл", "имейл")):
         return "done" if EMAIL_REQUEST_TEXT in (dialog_context or "") else "ask_email"
     if _mentions(text, _MESSENGER_MARKERS):
@@ -142,7 +149,8 @@ def contact_step(text: str, dialog_context: str) -> str | None:
 # на балл: ИИ-оценка «да» бывает и 70, а человек уже согласился.
 _YES_MARKERS = ("да", "давайте", "давай", "можно", "хорошо", "конечно", "ок", "окей", "ok", "удобно",
                 "согласна", "согласен", "звоните", "позвоните", "пусть позвонит", "было бы здорово",
-                "интересно", "не против", "го", "угу", "ага")
+                "интересно", "не против", "го", "угу", "ага", "спасибо", "жду", "буду ждать",
+                "договорились", "отлично", "пусть напишет")
 _NO_MARKERS = ("нет", "не надо", "не нужно", "не сейчас", "пока не", "позже", "потом", "сам посмотр",
                "сама посмотр", "не звон", "подумаю", "не удобно", "неудобно")
 
@@ -158,6 +166,39 @@ def accepted_specialist_offer(dialog_before: str, text: str) -> bool:
     if "?" in text or any(m in answer for m in _NO_MARKERS):
         return False
     return any(re.search(rf"(?<![а-яa-z]){re.escape(m)}(?![а-яa-z])", answer) for m in _YES_MARKERS)
+
+
+def manager_promised_handoff(dialog_before: str) -> bool:
+    """Последним написал менеджер и сам пообещал передать контакты специалисту («я тогда передам
+    ваши контакты специалисту…»). Согласие лида тогда — не повод спрашивать номер: передаём сразу."""
+    lines = [l for l in (dialog_before or "").splitlines() if l.strip()]
+    last = next((l for l in reversed(lines) if l.startswith(("бот:", "менеджер:"))), "")
+    if not last.startswith("менеджер:"):
+        return False
+    said = last.lower()
+    return "переда" in said and ("контакт" in said or "специалист" in said)
+
+
+def prefers_text(dialog_context: str) -> bool:
+    """Лид где-то в диалоге сказал, что звонить нельзя и общаться он может только перепиской."""
+    said, role = [], None
+    for line in (dialog_context or "").splitlines():  # многострочная реплика — продолжение предыдущей роли
+        for r in ("лид", "бот", "менеджер"):
+            if line.startswith(f"{r}: "):
+                role = r
+        if role == "лид":
+            said.append(line.lower())
+    return any(m in " ".join(said) for m in PHONE_REFUSAL_MARKERS)
+
+
+def has_phone_or_email(text: str) -> bool:
+    return bool(extract_phone(text or "") or EMAIL_RE.search(text or ""))
+
+
+def chat_contact(platform: str, username: str | None) -> str:
+    """Контакт для специалиста, когда лид договорился о переписке без номера."""
+    where = "в ВК" if platform == "vk" else (f"в тг @{username}" if username else "в тг")
+    return f"Писать здесь, {where} - так договорились с менеджером"
 
 
 def sent_contact_unasked(text: str) -> bool:
@@ -215,9 +256,10 @@ def generate_touch(band: str, funnel_stage: str, dialog_text: str) -> str:
         f"АКТУАЛЬНЫЕ ТАРИФЫ И ЦЕНЫ og1 (реальные факты; цифры - только если лид спросил о стоимости):\n"
         f"{catalog.tariff_price_summary()}\n\n"
         "Напиши одно короткое сообщение лиду (1-3 предложения) в стиле менеджера выше. "
-        "Если лид спрашивает про тарифы или цену - НАЗОВИ конкретные тарифы и цену «от» из списка "
-        "выше (не уклоняйся к менеджеру вместо ответа). Если про стоимость не спрашивал - цены не называй. "
-        "Не выдумывай цифры, которых нет в списке выше.\n\n"
+        "Если лид спрашивает про тарифы или цену - НАЗОВИ конкретные тарифы и цену из списка выше: "
+        "класс известен - цену для этого класса (со скидкой - скажи, до какого числа она действует), "
+        "не известен - цену «от» (не уклоняйся к менеджеру вместо ответа). Если про стоимость не "
+        "спрашивал - цены не называй. Не выдумывай цифры и условия акций, которых нет в списке выше.\n\n"
         "Реплики «менеджер» в диалоге - это живой менеджер og1, который пишет с этого же аккаунта. "
         "Ты продолжаешь разговор от его лица: не здоровайся и не представляйся заново, не повторяй "
         "уже сказанное, отвечай на то, что лид сказал в ответ на слова менеджера."
@@ -288,7 +330,7 @@ def extract_order(dialog_text: str) -> ExtractedOrder:
 
     return ExtractedOrder(
         tariff_name=tariff.name,
-        price=tariff.price_min,
+        price=catalog.current_min_price(tariff),
         department=department,
         needs_estimator=False,
         summary=f"Тариф «{tariff.name}» ({tariff.format}).",
