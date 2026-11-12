@@ -29,7 +29,7 @@ META_KEY = "site_prices"
 REFRESH_EVERY = timedelta(hours=23)
 CHECK_EVERY_SECONDS = 3600
 GRADE_TARIFFS = ("Школьный", "Ученический")
-PROMO_DETAILS_LIMIT = 700
+PROMO_DETAILS_LIMIT = 1800
 
 
 def _text(fragment: str) -> str:
@@ -90,6 +90,16 @@ def parse_prices(page: str) -> dict:
         notes = [n.strip() for n in re.findall(r"\*+\s*([А-ЯA-Z][^*]{10,})", _text(section))]
         if price:
             result["attestation"] = {"price": _rub(price.group(1)), "notes": notes}
+    section = _tariff_section(page, "Тариф «Любознательный»")
+    if section:
+        # блок цены: <s>старая</s> текущая <small>руб./месяц</small>
+        block = re.search(r'price-item__subtitle[^>]*>(.*?)<small', section, re.S)
+        if block:
+            old = re.search(r"<s[^>]*>(.*?)</s>", block.group(1), re.S)
+            current = _rub(_text(re.sub(r"<s[^>]*>.*?</s>", " ", block.group(1), flags=re.S)))
+            if current:
+                result["curious"] = {"price": _rub(_text(old.group(1))) if old else current,
+                                     "sale": current if old else None}
     return result
 
 
@@ -173,6 +183,10 @@ def describe_changes(old: dict | None, new: dict) -> list[str]:
     ob, nb = (old.get("attestation") or {}).get("price"), (new.get("attestation") or {}).get("price")
     if ob != nb:
         changes.append(f"«Аттестация»: {_fmt(ob)} → {_fmt(nb)} ₽")
+    oc, nc = old.get("curious") or {}, new.get("curious") or {}
+    if (oc.get("price"), oc.get("sale")) != (nc.get("price"), nc.get("sale")):
+        changes.append(f"«Любознательный»: {_fmt(oc.get('sale') or oc.get('price'))} → "
+                       f"{_fmt(nc.get('sale') or nc.get('price'))} ₽/мес")
     old_titles = {p["title"] for p in old.get("promos", [])}
     new_titles = {p["title"] for p in new.get("promos", [])}
     changes += [f"Новая акция: {t}" for t in sorted(new_titles - old_titles)]
@@ -207,12 +221,20 @@ def summary_for_prompt(data: dict | None = None) -> str | None:
     if att:
         notes = " ".join(att.get("notes") or [])
         lines.append(f"- Аттестация (прикрепление для аттестации): {_fmt(att['price'])} ₽" + (f". {notes}" if notes else ""))
+    cur = data.get("curious") or {}
+    if cur.get("price"):
+        price = (f"{_fmt(cur['sale'])} ₽/мес (было {_fmt(cur['price'])})" if cur.get("sale")
+                 else f"{_fmt(cur['price'])} ₽/мес")
+        lines.append(f"- Любознательный (самостоятельное изучение школьной программы на платформе, 5-11 классы, "
+                     f"без живых уроков с учителем): {price}")
     lines.append("- Пробный день: бесплатно (3 живых урока с учителем)")
     lines.append("- Индивидуальные репетиторы: по запросу")
     promos = data.get("promos") or []
     if promos:
         lines.append("\nДЕЙСТВУЮЩИЕ АКЦИИ og1 (с сайта og1.ru/akczii; упоминай, только если к месту — "
-                     "лид спросил о цене/скидках или подходит под условия; условия не додумывай):")
+                     "лид спросил о цене/скидках или подходит под условия; условия не додумывай. "
+                     "Суммы в рублях внутри текстов акций и новостей могут быть устаревшими: называй суммы "
+                     "только из списка тарифов выше, а из акций бери проценты, сроки и условия):")
         for p in promos:
             details = p.get("details") or p.get("desc") or ""
             lines.append(f"- {p['title']}: {details}")

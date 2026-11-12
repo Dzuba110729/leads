@@ -28,7 +28,7 @@ PRICES_PAGE = (
     + "".join(_tab(n, _sale("33 700", "30 330")) for n in range(11, 18)) + "до 31.10.2026"
     + "<h3>«Аттестация»</h3><div>15 000 руб.</div><p>Прикрепление на время аттестации*.</p>"
       "<p>* Прикрепление к ЧОУ осуществляется с 5 по 11 класс.</p><p>** За 9 и 11 класс аттестация не проводится.</p>"
-    + "<h3>Тариф «Любознательный»</h3>500 124 руб./месяц"
+    + "<h3>Тариф «Любознательный»</h3><div class=\"price-item__subtitle\"><s style=\"color:#808080\">500</s> 124 <small>руб./месяц</small></div>"
 )
 
 PROMOS_PAGE = (
@@ -55,6 +55,7 @@ def test_parses_grade_prices_sale_and_attestation():
     assert prices["sale_until"] == "31.10.2026"
     assert prices["attestation"]["price"] == 15000
     assert "За 9 и 11 класс аттестация не проводится." in prices["attestation"]["notes"]
+    assert prices["curious"] == {"price": 500, "sale": 124}
 
 
 def test_parses_only_active_promos_and_details():
